@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l c:/Code/Shader_Fun/shaders/*.vert c:/Code/Shader_Fun/shaders/*.frag c:/Code/Shader_Fun/shaders/*.comp)"
+    ]
+  }
+}

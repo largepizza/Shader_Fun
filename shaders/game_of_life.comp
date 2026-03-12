@@ -1,0 +1,39 @@
+#version 450
+
+// 16x16 thread groups — each thread processes one cell
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// rgba8 format: R channel = alive state (0 or 1)
+layout(set = 0, binding = 0, rgba8) uniform readonly  image2D currentGrid;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D nextGrid;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size  = imageSize(currentGrid);
+
+    // Out-of-bounds guard (grid may not be a multiple of 16)
+    if (coord.x >= size.x || coord.y >= size.y) return;
+
+    // Count alive neighbours with wrapping (toroidal grid)
+    int neighbors = 0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 ncoord = (coord + ivec2(dx, dy) + size) % size;
+            neighbors += int(imageLoad(currentGrid, ncoord).r > 0.5);
+        }
+    }
+
+    float current = imageLoad(currentGrid, coord).r;
+    float next;
+
+    if (current > 0.5) {
+        // Conway's rules: alive cell survives with 2 or 3 neighbors
+        next = (neighbors == 2 || neighbors == 3) ? 1.0 : 0.0;
+    } else {
+        // Dead cell is born with exactly 3 neighbors
+        next = (neighbors == 3) ? 1.0 : 0.0;
+    }
+
+    imageStore(nextGrid, coord, vec4(next, 0.0, 0.0, 1.0));
+}

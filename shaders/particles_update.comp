@@ -1,0 +1,59 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+struct Particle {
+    vec2 pos;
+    vec2 vel;
+    vec4 color;
+};
+
+// SSBO holding all particle data — read AND write in the same pass
+layout(set = 0, binding = 0) buffer ParticleBuffer {
+    Particle particles[];
+};
+
+layout(push_constant) uniform PC {
+    float dt;
+    float time;
+    vec2  mouseNDC;  // Mouse position in NDC space (-1..1)
+} pc;
+
+// Simple pseudo-random from a seed
+float rand(vec2 seed) {
+    return fract(sin(dot(seed, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= particles.length()) return;
+
+    Particle p = particles[idx];
+
+    // ── Mouse gravity attractor ────────────────────────────────────────────
+    vec2 toMouse = pc.mouseNDC - p.pos;
+    float dist   = length(toMouse) + 0.001;
+    // Gravitational-style attraction: F = k / r^2 (clamped to avoid singularity)
+    float strength = 0.15 / (dist * dist + 0.01);
+    p.vel += normalize(toMouse) * strength * pc.dt;
+
+    // ── Weak center attractor (keeps particles on screen) ─────────────────
+    p.vel += -p.pos * 0.05 * pc.dt;
+
+    // ── Damping (simulates drag) ──────────────────────────────────────────
+    p.vel *= 1.0 - (0.5 * pc.dt);
+
+    // ── Update position ───────────────────────────────────────────────────
+    p.pos += p.vel * pc.dt;
+
+    // ── Soft boundary: reflect particles that escape ───────────────────────
+    if (abs(p.pos.x) > 1.5) p.vel.x *= -0.5;
+    if (abs(p.pos.y) > 1.5) p.vel.y *= -0.5;
+    p.pos = clamp(p.pos, vec2(-1.5), vec2(1.5));
+
+    // ── Colour shift based on speed ───────────────────────────────────────
+    float speed = length(p.vel);
+    p.color.rgb = mix(p.color.rgb, vec3(1.0, 0.6, 0.2), clamp(speed * 2.0, 0.0, 0.8));
+
+    particles[idx] = p;
+}

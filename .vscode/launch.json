@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            // Press F5 to build (if needed) and launch with the debugger attached.
+            // CMake Tools handles resolving the exe path and working directory.
+            "name": "Debug ShaderFun",
+            "type": "cppvsdbg",          // Use cppdbg on Linux/macOS
+            "request": "launch",
+            "program": "${command:cmake.launchTargetPath}",
+            "args": [],
+            "stopAtEntry": false,
+            // Working directory = folder containing the exe (where shaders/ lives)
+            "cwd": "${command:cmake.launchTargetDirectory}",
+            "environment": [],
+            "console": "integratedTerminal",
+            "preLaunchTask": "CMake: build"
+        }
+    ]
+}

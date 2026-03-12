@@ -1,0 +1,17 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <ProjectOutputs>
+    <ProjectOutput>
+      <FullPath>C:\Code\Shader_Fun\build\x64\Debug\ZERO_CHECK</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Code\Shader_Fun\build\x64\Debug\CompileShaders</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Code\Shader_Fun\build\Debug\ShaderFun.exe</FullPath>
+    </ProjectOutput>
+  </ProjectOutputs>
+  <ContentFiles />
+  <SatelliteDlls />
+  <NonRecipeFileRefs />
+</Project>

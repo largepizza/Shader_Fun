@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Code\Shader_Fun\build\_deps\glm-subbuild\CMakeFiles\518e904a20e3ab07e11e07ef0c4aadf9\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{952F9180-8066-3C4F-B978-F9780D3C6ED6}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

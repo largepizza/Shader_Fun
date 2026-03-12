@@ -1,0 +1,10 @@
+^C:\CODE\SHADER_FUN\BUILD\_DEPS\GLFW-SUBBUILD\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Code/Shader_Fun/build/_deps/glfw-subbuild -BC:/Code/Shader_Fun/build/_deps/glfw-subbuild --check-stamp-file C:/Code/Shader_Fun/build/_deps/glfw-subbuild/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

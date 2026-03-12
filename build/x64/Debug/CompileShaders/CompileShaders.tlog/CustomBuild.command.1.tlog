@@ -1,0 +1,78 @@
+^C:\CODE\SHADER_FUN\BUILD\CMAKEFILES\51AE47F0187950C69FAFEDCD47F1ABED\FULLSCREEN.VERT.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.341.1\Bin\glslc.exe C:/Code/Shader_Fun/shaders/fullscreen.vert -o C:/Code/Shader_Fun/build/shaders/fullscreen.vert.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\CODE\SHADER_FUN\BUILD\CMAKEFILES\51AE47F0187950C69FAFEDCD47F1ABED\GAME_OF_LIFE.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.341.1\Bin\glslc.exe C:/Code/Shader_Fun/shaders/game_of_life.comp -o C:/Code/Shader_Fun/build/shaders/game_of_life.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\CODE\SHADER_FUN\BUILD\CMAKEFILES\51AE47F0187950C69FAFEDCD47F1ABED\GOL_DISPLAY.FRAG.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.341.1\Bin\glslc.exe C:/Code/Shader_Fun/shaders/gol_display.frag -o C:/Code/Shader_Fun/build/shaders/gol_display.frag.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\CODE\SHADER_FUN\BUILD\CMAKEFILES\51AE47F0187950C69FAFEDCD47F1ABED\PARTICLES_DRAW.FRAG.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.341.1\Bin\glslc.exe C:/Code/Shader_Fun/shaders/particles_draw.frag -o C:/Code/Shader_Fun/build/shaders/particles_draw.frag.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\CODE\SHADER_FUN\BUILD\CMAKEFILES\51AE47F0187950C69FAFEDCD47F1ABED\PARTICLES_DRAW.VERT.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.341.1\Bin\glslc.exe C:/Code/Shader_Fun/shaders/particles_draw.vert -o C:/Code/Shader_Fun/build/shaders/particles_draw.vert.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\CODE\SHADER_FUN\BUILD\CMAKEFILES\51AE47F0187950C69FAFEDCD47F1ABED\PARTICLES_UPDATE.COMP.SPV.RULE
+setlocal
+C:\VulkanSDK\1.4.341.1\Bin\glslc.exe C:/Code/Shader_Fun/shaders/particles_update.comp -o C:/Code/Shader_Fun/build/shaders/particles_update.comp.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\CODE\SHADER_FUN\BUILD\CMAKEFILES\3B6A33F6BE830BB620BCF2E8A2197DC7\COMPILESHADERS.RULE
+setlocal
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\CODE\SHADER_FUN\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Code/Shader_Fun -BC:/Code/Shader_Fun/build --check-stamp-file C:/Code/Shader_Fun/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
