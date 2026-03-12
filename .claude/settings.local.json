@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(wc -l c:/Code/Shader_Fun/shaders/*.vert c:/Code/Shader_Fun/shaders/*.frag c:/Code/Shader_Fun/shaders/*.comp)"
+      "Bash(wc -l c:/Code/Shader_Fun/shaders/*.vert c:/Code/Shader_Fun/shaders/*.frag c:/Code/Shader_Fun/shaders/*.comp)",
+      "Bash(cmake -B build -S .)",
+      "Bash(cmake --build build --config Debug)"
     ]
   }
 }
