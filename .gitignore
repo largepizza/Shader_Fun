@@ -1,0 +1,21 @@
+# ── Build output ──────────────────────────────────────────────────────────────
+build/
+out/
+
+# ── Compiled shaders (generated at build time from shaders/) ─────────────────
+*.spv
+
+# ── VS Code local state (workspace config is kept, local state is not) ────────
+.vscode/*.log
+
+# ── OS artifacts ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Compiler artifacts ────────────────────────────────────────────────────────
+*.obj
+*.ilk
+*.pdb
+*.exe
+*.lib
+*.dll

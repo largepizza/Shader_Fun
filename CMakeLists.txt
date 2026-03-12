@@ -31,7 +31,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 
-file(GLOB_RECURSE SOURCES "src/*.cpp")
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 add_executable(ShaderFun ${SOURCES})
 target_include_directories(ShaderFun PRIVATE src)
 target_link_libraries(ShaderFun PRIVATE Vulkan::Vulkan glfw glm::glm)

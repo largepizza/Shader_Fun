@@ -29,25 +29,34 @@ Shader_Fun/
 │   ├── launch.json         # F5 = build + run with debugger
 │   └── c_cpp_properties.json
 ├── src/
-│   ├── main.cpp            # Entry point — creates App, calls run()
-│   ├── App.h               # Class declaration + constants
-│   └── App.cpp             # All Vulkan logic (~1200 lines)
+│   ├── main.cpp            # Entry point — picks one simulation, runs App
+│   ├── App.h / App.cpp     # Thin loop: window + frame submit (~100 lines)
+│   ├── VulkanContext.h/.cpp# All Vulkan boilerplate + helpers (~550 lines, never changes)
+│   ├── Simulation.h        # Abstract base class — the interface every sim implements
+│   └── simulations/
+│       ├── GameOfLife.h/.cpp  # Self-contained Conway's Game of Life
+│       └── Particles.h/.cpp   # Self-contained 500k particle system
 └── shaders/
-    ├── fullscreen.vert     # Draws a fullscreen triangle (no vertex buffer needed)
-    ├── gol_display.frag    # Colors Game of Life pixels with glow
-    ├── game_of_life.comp   # Conway's Game of Life rules on the GPU
+    ├── fullscreen.vert        # Draws a fullscreen triangle (no vertex buffer needed)
+    ├── gol_display.frag       # Colors Game of Life pixels with glow
+    ├── game_of_life.comp      # Conway's Game of Life rules on the GPU
     ├── particles_update.comp  # Physics update for 500k particles
     ├── particles_draw.vert    # Reads particle positions from GPU buffer
     └── particles_draw.frag    # Circular point sprite with brightness falloff
 ```
 
-### Why one big `App` class?
+### The layered design
 
-Vulkan requires a lot of objects that all reference each other (the device creates
-pipelines, pipelines reference render passes, render passes reference swapchain
-formats, etc.). Keeping everything in one class makes those relationships visible
-instead of hidden across many files. Once you understand the full picture, splitting
-it up is straightforward.
+The codebase is split into three stable layers:
+
+| Layer | Files | Changes when |
+|-------|-------|-------------|
+| **Platform** | `VulkanContext.h/.cpp` | Almost never — only if you add a Vulkan feature |
+| **Framework** | `App.h/.cpp`, `Simulation.h` | Rarely — only if the frame loop changes |
+| **Simulations** | `simulations/*.h/.cpp` | Constantly — this is where experiments live |
+
+Adding a new simulation means creating two new files and changing one line in `main.cpp`.
+The platform and framework layers never need to be touched.
 
 ---
 

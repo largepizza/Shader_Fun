@@ -34,7 +34,7 @@ void main() {
     vec2 toMouse = pc.mouseNDC - p.pos;
     float dist   = length(toMouse) + 0.001;
     // Gravitational-style attraction: F = k / r^2 (clamped to avoid singularity)
-    float strength = 0.15 / (dist * dist + 0.01);
+    float strength = 0.05 / (dist * dist + 0.01);
     p.vel += normalize(toMouse) * strength * pc.dt;
 
     // ── Weak center attractor (keeps particles on screen) ─────────────────
