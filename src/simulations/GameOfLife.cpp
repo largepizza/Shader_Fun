@@ -65,7 +65,7 @@ void GameOfLife::recordDraw(VkCommandBuffer cmd, VulkanContext& ctx, float /*dt*
 }
 
 // ─── buildUI ──────────────────────────────────────────────────────────────────
-void GameOfLife::buildUI(float /*dt*/) {
+void GameOfLife::buildUI(float /*dt*/, UIRenderer& /*ui*/) {
     // Full-screen invisible root container (required by Clay as the layout root)
     CLAY(CLAY_ID("GolRoot"), {
         .layout = {

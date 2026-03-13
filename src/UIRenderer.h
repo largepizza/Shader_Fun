@@ -20,6 +20,20 @@ struct UIPushConstants {
     glm::vec2 screenSize; // viewport size in pixels, used by vertex shader for NDC conversion
 };
 
+// Per-frame mouse and button state — read by simulations in buildUI().
+struct UIInput {
+    float screenW  = 0, screenH  = 0; // window dimensions in pixels
+    float mouseX   = 0, mouseY   = 0; // current cursor position
+    float dMouseX  = 0, dMouseY  = 0; // cursor delta since last frame
+    bool  lmbDown     = false; // left mouse button held
+    bool  lmbPressed  = false; // went down this frame
+    bool  lmbReleased = false; // went up this frame
+    bool  rmbDown     = false; // right mouse button held
+    bool  rmbPressed  = false;
+    bool  rmbReleased = false;
+    float dt = 0;
+};
+
 class UIRenderer {
 public:
     // Call after VulkanContext is initialized.
@@ -32,15 +46,26 @@ public:
     void cleanup(VkDevice device);
 
     // Call once at the start of each frame, before the simulation's buildUI().
-    // This sets up Clay's pointer state and begins the layout pass.
+    // Accepts both left and right mouse button states.
     void beginFrame(float width, float height,
-                    float mouseX, float mouseY, bool mouseDown,
+                    float mouseX, float mouseY, bool lmbDown, bool rmbDown,
                     float scrollDeltaX, float scrollDeltaY,
                     float dt);
 
     // Call inside the render pass, after sim->recordDraw() and before vkCmdEndRenderPass.
     // Finalizes Clay layout, processes render commands, draws all UI geometry.
     void record(VkCommandBuffer cmd, VulkanContext& ctx);
+
+    // Per-frame input state — read by simulations in buildUI().
+    const UIInput& input() const { return frameInput; }
+
+    // Register a screen rect that should absorb mouse events (toolbar, open windows, etc.).
+    // Call in buildUI() for each visible UI panel. Resets every frame in beginFrame().
+    void addMouseCaptureRect(float x, float y, float w, float h);
+
+    // True if mouse is currently over any registered capture rect.
+    // Simulations read this to suppress scene interaction while hovering over UI.
+    bool mouseOverUI() const { return prevMouseOverUI; }
 
     // Font IDs for CLAY_TEXT_CONFIG — load additional fonts if needed.
     uint16_t defaultFontId() const { return 0; }
@@ -89,6 +114,13 @@ private:
     std::vector<UIVertex>  vertices;
     std::vector<uint32_t>  indices;
     float                  frameW = 800.0f, frameH = 600.0f;
+
+    // ── Input tracking ────────────────────────────────────────────────────
+    UIInput frameInput;
+    bool    prevLmb = false, prevRmb = false;
+    float   prevMx  = 0,     prevMy  = 0;
+    bool    mouseIsOverUI = false;
+    bool    prevMouseOverUI = false; // value from the end of last frame; read by mouseOverUI()
 
     // ── Private helpers ───────────────────────────────────────────────────
     void loadFont(VulkanContext& ctx);

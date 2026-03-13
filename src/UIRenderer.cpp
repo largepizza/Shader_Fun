@@ -47,22 +47,26 @@ void UIRenderer::init(VulkanContext& ctx) {
     Clay_SetMeasureTextFunction(
         [](Clay_StringSlice text, Clay_TextElementConfig* cfg, void* ud) -> Clay_Dimensions {
             UIRenderer* self = reinterpret_cast<UIRenderer*>(ud);
-            stbtt_fontinfo* fi    = reinterpret_cast<stbtt_fontinfo*>(self->font.fontInfo);
-            float           scale = stbtt_ScaleForPixelHeight(fi, (float)cfg->fontSize);
+            stbtt_fontinfo* fi = reinterpret_cast<stbtt_fontinfo*>(self->font.fontInfo);
 
-            int ascent, descent, lineGap;
-            stbtt_GetFontVMetrics(fi, &ascent, &descent, &lineGap);
+            // xadvance in stbtt_bakedchar is in baked-size pixels.
+            // Scale to the requested fontSize by simple ratio, not by font design-unit scale.
+            float renderScale = (float)cfg->fontSize / self->font.bakedSize;
 
-            float totalW = 0.0f;
             stbtt_bakedchar* bc = reinterpret_cast<stbtt_bakedchar*>(self->font.charData.data());
-
+            float totalW = 0.0f;
             for (int i = 0; i < text.length; ++i) {
                 unsigned char c = (unsigned char)text.chars[i];
                 if (c < 32 || c > 126) continue;
-                totalW += bc[c - 32].xadvance * scale;
+                totalW += bc[c - 32].xadvance * renderScale;
             }
 
-            float height = (float)(ascent - descent + lineGap) * scale;
+            // Height uses the font's design-unit metrics (correct — these are not in baked pixels)
+            int ascent, descent, lineGap;
+            stbtt_GetFontVMetrics(fi, &ascent, &descent, &lineGap);
+            float fontScale = stbtt_ScaleForPixelHeight(fi, (float)cfg->fontSize);
+            float height = (float)(ascent - descent + lineGap) * fontScale;
+
             return Clay_Dimensions{ totalW, height };
         },
         this);
@@ -484,18 +488,48 @@ void UIRenderer::cleanup(VkDevice device) {
 // beginFrame
 // ─────────────────────────────────────────────────────────────────────────────
 void UIRenderer::beginFrame(float width, float height,
-                             float mouseX, float mouseY, bool mouseDown,
+                             float mouseX, float mouseY, bool lmbDown, bool rmbDown,
                              float scrollDeltaX, float scrollDeltaY,
                              float dt) {
     frameW = width;
     frameH = height;
 
+    // Compute per-frame input state; simulations read this in buildUI().
+    frameInput.screenW     = width;
+    frameInput.screenH     = height;
+    frameInput.mouseX      = mouseX;
+    frameInput.mouseY      = mouseY;
+    frameInput.dMouseX     = mouseX - prevMx;
+    frameInput.dMouseY     = mouseY - prevMy;
+    frameInput.lmbDown     = lmbDown;
+    frameInput.lmbPressed  = lmbDown && !prevLmb;
+    frameInput.lmbReleased = !lmbDown && prevLmb;
+    frameInput.rmbDown     = rmbDown;
+    frameInput.rmbPressed  = rmbDown && !prevRmb;
+    frameInput.rmbReleased = !rmbDown && prevRmb;
+    frameInput.dt          = dt;
+
+    prevMx  = mouseX;
+    prevMy  = mouseY;
+    prevLmb = lmbDown;
+    prevRmb = rmbDown;
+
+    // Save last frame's capture result, then reset for this frame's registrations.
+    prevMouseOverUI = mouseIsOverUI;
+    mouseIsOverUI = false;
+
     Clay_SetLayoutDimensions(Clay_Dimensions{ width, height });
-    Clay_SetPointerState(Clay_Vector2{ mouseX, mouseY }, mouseDown);
+    Clay_SetPointerState(Clay_Vector2{ mouseX, mouseY }, lmbDown);
     Clay_UpdateScrollContainers(true,
                                 Clay_Vector2{ scrollDeltaX, scrollDeltaY },
                                 dt);
     Clay_BeginLayout();
+}
+
+void UIRenderer::addMouseCaptureRect(float x, float y, float w, float h) {
+    if (frameInput.mouseX >= x && frameInput.mouseX < x + w &&
+        frameInput.mouseY >= y && frameInput.mouseY < y + h)
+        mouseIsOverUI = true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -527,15 +561,20 @@ void UIRenderer::pushQuad(float x, float y, float w, float h,
 // ─────────────────────────────────────────────────────────────────────────────
 void UIRenderer::pushText(float x, float y, const char* text, int len,
                            float fontSize, glm::vec4 color) {
-    stbtt_fontinfo* fi    = reinterpret_cast<stbtt_fontinfo*>(font.fontInfo);
-    float           scale = stbtt_ScaleForPixelHeight(fi, fontSize);
+    stbtt_fontinfo* fi = reinterpret_cast<stbtt_fontinfo*>(font.fontInfo);
 
+    // renderScale converts baked-pixel coordinates to requested-fontSize pixels.
+    // bakedchar fields (xoff, yoff, x0..x1, xadvance) are in baked-size pixels,
+    // NOT font design units — so use a simple ratio, not stbtt_ScaleForPixelHeight.
+    float renderScale = fontSize / font.bakedSize;
+
+    // Baseline offset uses design-unit metrics (ascent is in font units, scale converts to pixels)
     int ascent, descent, lineGap;
     stbtt_GetFontVMetrics(fi, &ascent, &descent, &lineGap);
+    float fontScale = stbtt_ScaleForPixelHeight(fi, fontSize);
 
-    // Shift y down to the baseline
-    float penX = x;
-    float baselineY = y + (float)ascent * scale;
+    float penX     = x;
+    float baselineY = y + (float)ascent * fontScale;
 
     stbtt_bakedchar* bc = reinterpret_cast<stbtt_bakedchar*>(font.charData.data());
     float atlasW = (float)font.atlasW;
@@ -547,10 +586,10 @@ void UIRenderer::pushText(float x, float y, const char* text, int len,
 
         stbtt_bakedchar& ch = bc[c - 32];
 
-        float gx = penX + ch.xoff * scale;
-        float gy = baselineY + ch.yoff * scale;
-        float gw = (float)(ch.x1 - ch.x0) * scale;
-        float gh = (float)(ch.y1 - ch.y0) * scale;
+        float gx = penX + ch.xoff * renderScale;
+        float gy = baselineY + ch.yoff * renderScale;
+        float gw = (float)(ch.x1 - ch.x0) * renderScale;
+        float gh = (float)(ch.y1 - ch.y0) * renderScale;
 
         float u0 = (float)ch.x0 / atlasW;
         float v0 = (float)ch.y0 / atlasH;
@@ -559,7 +598,7 @@ void UIRenderer::pushText(float x, float y, const char* text, int len,
 
         pushQuad(gx, gy, gw, gh, u0, v0, u1, v1, color, 1.0f);
 
-        penX += ch.xadvance * scale;
+        penX += ch.xadvance * renderScale;
     }
 }
 

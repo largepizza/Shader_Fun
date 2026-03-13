@@ -1,12 +1,51 @@
 #include "Particles.h"
+#include "../UIRenderer.h"
 
 #include <algorithm>
 #include <random>
 #include <stdexcept>
+#include <cstdio>
 
 // clay.h is a single-header library; CLAY_IMPLEMENTATION is defined only in UIRenderer.cpp.
 // Include here without the implementation define so we can use the CLAY macros.
 #include "clay.h"
+
+// ─── Layout constants — must match Clay sizing declarations exactly ────────────
+static constexpr float TOOLBAR_H  = 44.0f;  // bottom toolbar height
+static constexpr float BTN_W      = 92.0f;  // tool button width
+static constexpr float BTN_H      = 30.0f;  // tool button height
+static constexpr float SETTINGS_W = 268.0f; // settings window width
+static constexpr float W_TITLE_H  = 30.0f;  // title bar height
+static constexpr float W_PAD      = 10.0f;  // window inner padding
+static constexpr float W_LABEL_W  = 80.0f;  // label column width
+static constexpr float W_CHILD_GAP = 4.0f;  // label-to-control gap
+static constexpr float SLIDER_W   = SETTINGS_W - 2*W_PAD - W_LABEL_W - W_CHILD_GAP;
+static constexpr float SLIDER_H   = 14.0f;
+static constexpr float W_ROW_H    = 22.0f;  // content row height
+static constexpr float W_ROW_GAP  = 6.0f;   // gap between rows
+
+// ─── Colour palette ────────────────────────────────────────────────────────────
+static constexpr Clay_Color COL_WIN_BG   = { 14, 14, 24, 230 };
+static constexpr Clay_Color COL_TITLE_BG = { 22, 22, 38, 255 };
+static constexpr Clay_Color COL_BTN      = { 28, 28, 48, 210 };
+static constexpr Clay_Color COL_BTN_HOV  = { 48, 48, 75, 230 };
+static constexpr Clay_Color COL_ACTIVE   = { 40, 100, 200, 240 };
+static constexpr Clay_Color COL_ACT_HOV  = { 60, 130, 230, 255 };
+static constexpr Clay_Color COL_TOOLBAR  = { 12, 12, 22, 235 };
+static constexpr Clay_Color COL_TRACK    = { 35, 35, 58, 255 };
+static constexpr Clay_Color COL_FILL     = { 70, 120, 210, 255 };
+static constexpr Clay_Color COL_TEXT_HI  = { 210, 220, 255, 255 };
+static constexpr Clay_Color COL_TEXT_DIM = { 140, 140, 165, 255 };
+static constexpr Clay_Color COL_CLOSE    = { 180, 50,  50, 220 };
+static constexpr Clay_Color COL_CLOSE_H  = { 220, 70,  70, 255 };
+static constexpr Clay_Color COL_RESET    = { 55,  40,  100, 220 };
+static constexpr Clay_Color COL_RESET_H  = { 80,  60,  150, 255 };
+
+// ─── Helper: pick between active/hovered/normal button colour ─────────────────
+static inline Clay_Color btnBg(bool active, bool hov) {
+    if (active) return hov ? COL_ACT_HOV : COL_ACTIVE;
+    return hov ? COL_BTN_HOV : COL_BTN;
+}
 
 // ─── init ─────────────────────────────────────────────────────────────────────
 void Particles::init(VulkanContext& ctx) {
@@ -19,7 +58,6 @@ void Particles::init(VulkanContext& ctx) {
 
 // ─── onResize ─────────────────────────────────────────────────────────────────
 void Particles::onResize(VulkanContext& ctx) {
-    // Only the draw pipeline bakes in viewport size; compute is unaffected
     vkDestroyPipeline(ctx.device, drawPipeline, nullptr);
     drawPipeline = VK_NULL_HANDLE;
     createDrawPipeline(ctx);
@@ -27,12 +65,21 @@ void Particles::onResize(VulkanContext& ctx) {
 
 // ─── recordCompute ────────────────────────────────────────────────────────────
 void Particles::recordCompute(VkCommandBuffer cmd, VulkanContext& ctx, float dt) {
+    // Handle pending reset (synchronous — safe before adding work to cmd)
+    if (pendingReset) {
+        pendingReset = false;
+        initParticles(ctx);
+    }
+
     totalTime += dt;
 
     ParticlePushConstants pc{};
-    pc.dt       = dt;
-    pc.time     = totalTime;
-    pc.mouseNDC = mouseNDC;
+    pc.dt            = dt;
+    pc.time          = totalTime;
+    pc.mouseNDC      = mouseNDC;
+    pc.forceStrength = forceStrength;
+    pc.viscosity     = viscosity;
+    pc.colorMode     = colorMode;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -43,10 +90,10 @@ void Particles::recordCompute(VkCommandBuffer cmd, VulkanContext& ctx, float dt)
     uint32_t groups = (PARTICLE_COUNT + 255) / 256;
     vkCmdDispatch(cmd, groups, 1, 1);
 
-    // Barrier: compute write → vertex shader read
+    // Barrier: compute write → vertex shader SSBO read.
     VkBufferMemoryBarrier bmb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
     bmb.srcAccessMask       = VK_ACCESS_SHADER_WRITE_BIT;
-    bmb.dstAccessMask       = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+    bmb.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
     bmb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bmb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bmb.buffer              = buffer;
@@ -59,7 +106,6 @@ void Particles::recordCompute(VkCommandBuffer cmd, VulkanContext& ctx, float dt)
 }
 
 // ─── recordDraw ───────────────────────────────────────────────────────────────
-// The render pass is already open when this is called; do NOT begin/end it here.
 void Particles::recordDraw(VkCommandBuffer cmd, VulkanContext& ctx, float /*dt*/) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, drawPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -68,36 +114,303 @@ void Particles::recordDraw(VkCommandBuffer cmd, VulkanContext& ctx, float /*dt*/
 }
 
 // ─── buildUI ──────────────────────────────────────────────────────────────────
-void Particles::buildUI(float /*dt*/) {
-    // Full-screen invisible root container (required by Clay as the layout root)
-    CLAY(CLAY_ID("ParticlesRoot"), {
-        .layout = {
-            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
-            .padding = CLAY_PADDING_ALL(12)
-        }
-    }) {
-        // Info panel anchored to the top-left corner
-        CLAY(CLAY_ID("ParticlesInfoPanel"), {
-            .layout = {
-                .sizing = {
-                    .width  = CLAY_SIZING_FIXED(220),
-                    .height = CLAY_SIZING_FIT(0)
-                },
-                .padding         = CLAY_PADDING_ALL(10),
-                .childGap        = 6,
-                .layoutDirection = CLAY_TOP_TO_BOTTOM
-            },
-            .backgroundColor = { 10, 10, 20, 200 },
-            .cornerRadius    = CLAY_CORNER_RADIUS(6)
-        }) {
-            CLAY_TEXT(CLAY_STRING("Particles"),
-                CLAY_TEXT_CONFIG({ .textColor = {100, 160, 255, 255}, .fontSize = 18 }));
-            CLAY_TEXT(CLAY_STRING("500 000 particles"),
-                CLAY_TEXT_CONFIG({ .textColor = {180, 180, 180, 255}, .fontSize = 14 }));
-            CLAY_TEXT(CLAY_STRING("Mouse  attract"),
-                CLAY_TEXT_CONFIG({ .textColor = {120, 120, 140, 255}, .fontSize = 13 }));
+// Field ordering in Clay_LayoutConfig:     sizing, padding, childGap, childAlignment, layoutDirection
+// Field ordering in Clay_ElementDeclaration: layout, backgroundColor, cornerRadius, ..., floating
+// Field ordering in Clay_FloatingElementConfig: offset, zIndex, pointerCaptureMode, attachTo
+void Particles::buildUI(float /*dt*/, UIRenderer& ui) {
+    const UIInput& inp = ui.input();
+    bool overUI = ui.mouseOverUI(); // previous frame — correctly gates scene input
+
+    // ── Compute force for this frame ─────────────────────────────────────────
+    forceStrength = 0.0f;
+    if (!overUI) {
+        int dir = 0;
+        if (inp.lmbDown) dir = (activeTool == ParticleTool::Attract) ?  1 : -1;
+        if (inp.rmbDown) dir = (activeTool == ParticleTool::Attract) ? -1 :  1;
+        forceStrength = (float)dir;
+    }
+
+    // ── Settings window drag ──────────────────────────────────────────────────
+    if (settingsWin.dragging) {
+        settingsWin.x += inp.dMouseX;
+        settingsWin.y += inp.dMouseY;
+        settingsWin.x = std::clamp(settingsWin.x, 0.0f, inp.screenW - SETTINGS_W);
+        settingsWin.y = std::clamp(settingsWin.y, 0.0f, inp.screenH - W_TITLE_H);
+        if (!inp.lmbDown) settingsWin.dragging = false;
+    }
+
+    // ── Friction slider interaction (position computed from known layout constants) ─
+    if (settingsWin.open) {
+        float trackX = settingsWin.x + W_PAD + W_LABEL_W + W_CHILD_GAP;
+        float trackY = settingsWin.y + W_TITLE_H + W_PAD + (W_ROW_H - SLIDER_H) * 0.5f;
+        bool overTrack = inp.mouseX >= trackX && inp.mouseX < trackX + SLIDER_W
+                      && inp.mouseY >= trackY && inp.mouseY < trackY + SLIDER_H;
+        if (inp.lmbPressed && overTrack) visSliderDrag = true;
+        if (!inp.lmbDown) visSliderDrag = false;
+        if (visSliderDrag) {
+            float t  = std::clamp((inp.mouseX - trackX) / SLIDER_W, 0.0f, 1.0f);
+            viscosity = 0.999f - t * 0.099f; // left=no friction, right=max friction
         }
     }
+
+    // ── Register mouse-capture rects ─────────────────────────────────────────
+    ui.addMouseCaptureRect(0, inp.screenH - TOOLBAR_H, inp.screenW, TOOLBAR_H);
+    if (settingsWin.open)
+        ui.addMouseCaptureRect(settingsWin.x, settingsWin.y, SETTINGS_W,
+                               W_TITLE_H + W_PAD*2 + W_ROW_H*3 + W_ROW_GAP*2 + 36.0f);
+
+    // ── Clay layout ──────────────────────────────────────────────────────────
+    CLAY(CLAY_ID("PRoot"), {
+        .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) } }
+    }) {
+
+        // ── Bottom toolbar (floating) ─────────────────────────────────────
+        CLAY(CLAY_ID("Toolbar"), {
+            .layout = {
+                .sizing         = { CLAY_SIZING_FIXED(inp.screenW), CLAY_SIZING_FIXED(TOOLBAR_H) },
+                .padding        = CLAY_PADDING_ALL(7),
+                .childGap       = 6,
+                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                .layoutDirection = CLAY_LEFT_TO_RIGHT
+            },
+            .backgroundColor = COL_TOOLBAR,
+            .floating = {
+                .offset = { 0, inp.screenH - TOOLBAR_H },
+                .zIndex = 5,
+                .attachTo = CLAY_ATTACH_TO_ROOT
+            }
+        }) {
+            // Attract tool button
+            CLAY(CLAY_ID("BtnAttract"), {
+                .layout = {
+                    .sizing         = { CLAY_SIZING_FIXED(BTN_W), CLAY_SIZING_FIXED(BTN_H) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                },
+                .backgroundColor = btnBg(activeTool == ParticleTool::Attract, hovAttract),
+                .cornerRadius    = CLAY_CORNER_RADIUS(4)
+            }) {
+                hovAttract = Clay_Hovered();
+                if (hovAttract && inp.lmbPressed) activeTool = ParticleTool::Attract;
+                CLAY_TEXT(CLAY_STRING(">> Attract"),
+                    CLAY_TEXT_CONFIG({ .textColor = COL_TEXT_HI, .fontSize = 13 }));
+            }
+
+            // Repulse tool button
+            CLAY(CLAY_ID("BtnRepulse"), {
+                .layout = {
+                    .sizing         = { CLAY_SIZING_FIXED(BTN_W), CLAY_SIZING_FIXED(BTN_H) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                },
+                .backgroundColor = btnBg(activeTool == ParticleTool::Repulse, hovRepulse),
+                .cornerRadius    = CLAY_CORNER_RADIUS(4)
+            }) {
+                hovRepulse = Clay_Hovered();
+                if (hovRepulse && inp.lmbPressed) activeTool = ParticleTool::Repulse;
+                CLAY_TEXT(CLAY_STRING("<< Repulse"),
+                    CLAY_TEXT_CONFIG({ .textColor = COL_TEXT_HI, .fontSize = 13 }));
+            }
+
+            CLAY(CLAY_ID("TBSep"), {
+                .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } }
+            }) {}
+
+            CLAY_TEXT(CLAY_STRING("LMB = tool    RMB = inverse"),
+                CLAY_TEXT_CONFIG({ .textColor = COL_TEXT_DIM, .fontSize = 12 }));
+
+            CLAY(CLAY_ID("TBSep2"), {
+                .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } }
+            }) {}
+
+            // Settings button
+            CLAY(CLAY_ID("BtnSettings"), {
+                .layout = {
+                    .sizing         = { CLAY_SIZING_FIXED(BTN_W), CLAY_SIZING_FIXED(BTN_H) },
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                },
+                .backgroundColor = btnBg(settingsWin.open, hovSettings),
+                .cornerRadius    = CLAY_CORNER_RADIUS(4)
+            }) {
+                hovSettings = Clay_Hovered();
+                if (hovSettings && inp.lmbPressed) settingsWin.open = !settingsWin.open;
+                CLAY_TEXT(CLAY_STRING("Settings"),
+                    CLAY_TEXT_CONFIG({ .textColor = COL_TEXT_HI, .fontSize = 13 }));
+            }
+        } // end Toolbar
+
+        // ── Settings window (floating) ────────────────────────────────────
+        if (settingsWin.open) {
+            CLAY(CLAY_ID("SettingsWin"), {
+                .layout = {
+                    .sizing          = { CLAY_SIZING_FIXED(SETTINGS_W), CLAY_SIZING_FIT(0) },
+                    .layoutDirection = CLAY_TOP_TO_BOTTOM
+                },
+                .backgroundColor = COL_WIN_BG,
+                .cornerRadius    = CLAY_CORNER_RADIUS(6),
+                .floating = {
+                    .offset             = { settingsWin.x, settingsWin.y },
+                    .zIndex             = 10,
+                    .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_CAPTURE,
+                    .attachTo           = CLAY_ATTACH_TO_ROOT
+                }
+            }) {
+
+                // Title bar (drag handle)
+                CLAY(CLAY_ID("SettingsTitle"), {
+                    .layout = {
+                        .sizing         = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(W_TITLE_H) },
+                        .padding        = { 10, 6, 0, 0 },
+                        .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                        .layoutDirection = CLAY_LEFT_TO_RIGHT
+                    },
+                    .backgroundColor = COL_TITLE_BG,
+                    .cornerRadius    = { 6, 6, 0, 0 }
+                }) {
+                    if (Clay_Hovered() && inp.lmbPressed && !settingsWin.dragging)
+                        settingsWin.dragging = true;
+
+                    CLAY_TEXT(CLAY_STRING("Particle Settings"),
+                        CLAY_TEXT_CONFIG({ .textColor = COL_TEXT_HI, .fontSize = 14 }));
+
+                    CLAY(CLAY_ID("TitleSpacer"), {
+                        .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } }
+                    }) {}
+
+                    // Close button
+                    CLAY(CLAY_ID("BtnClose"), {
+                        .layout = {
+                            .sizing         = { CLAY_SIZING_FIXED(24), CLAY_SIZING_FIXED(24) },
+                            .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                        },
+                        .backgroundColor = hovClose ? COL_CLOSE_H : COL_CLOSE,
+                        .cornerRadius    = CLAY_CORNER_RADIUS(4)
+                    }) {
+                        hovClose = Clay_Hovered();
+                        if (hovClose && inp.lmbPressed) settingsWin.open = false;
+                        CLAY_TEXT(CLAY_STRING("X"),
+                            CLAY_TEXT_CONFIG({ .textColor = {255,255,255,255}, .fontSize = 13 }));
+                    }
+                } // end title bar
+
+                // Content area
+                CLAY(CLAY_ID("SettingsContent"), {
+                    .layout = {
+                        .sizing          = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                        .padding         = CLAY_PADDING_ALL((uint16_t)W_PAD),
+                        .childGap        = (uint16_t)W_ROW_GAP,
+                        .layoutDirection = CLAY_TOP_TO_BOTTOM
+                    }
+                }) {
+
+                    // ── Friction slider row ────────────────────────────────
+                    CLAY(CLAY_ID("ViscRow"), {
+                        .layout = {
+                            .sizing         = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(W_ROW_H) },
+                            .childGap       = (uint16_t)W_CHILD_GAP,
+                            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                            .layoutDirection = CLAY_LEFT_TO_RIGHT
+                        }
+                    }) {
+                        CLAY(CLAY_ID("ViscLabel"), {
+                            .layout = {
+                                .sizing         = { CLAY_SIZING_FIXED(W_LABEL_W), CLAY_SIZING_GROW(0) },
+                                .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }
+                            }
+                        }) {
+                            CLAY_TEXT(CLAY_STRING("Friction"),
+                                CLAY_TEXT_CONFIG({ .textColor = COL_TEXT_DIM, .fontSize = 13 }));
+                        }
+
+                        CLAY(CLAY_ID("ViscTrack"), {
+                            .layout = {
+                                .sizing = { CLAY_SIZING_FIXED(SLIDER_W), CLAY_SIZING_FIXED(SLIDER_H) }
+                            },
+                            .backgroundColor = COL_TRACK,
+                            .cornerRadius    = CLAY_CORNER_RADIUS(3)
+                        }) {
+                            float t = (0.999f - viscosity) / 0.099f; // full bar = max friction
+                            CLAY(CLAY_ID("ViscFill"), {
+                                .layout = {
+                                    .sizing = { CLAY_SIZING_FIXED(SLIDER_W * t), CLAY_SIZING_GROW(0) }
+                                },
+                                .backgroundColor = COL_FILL,
+                                .cornerRadius    = CLAY_CORNER_RADIUS(3)
+                            }) {}
+                        }
+
+                        // Value readout — viscBuf is a member so pointer stays valid in Clay_EndLayout
+                        int pct = (int)((0.999f - viscosity) / 0.099f * 100.0f + 0.5f);
+                        snprintf(viscBuf, sizeof(viscBuf), "%d%%", pct);
+                        Clay_String viscStr{ false, (int32_t)strlen(viscBuf), viscBuf };
+                        CLAY_TEXT(viscStr,
+                            CLAY_TEXT_CONFIG({ .textColor = COL_TEXT_DIM, .fontSize = 12 }));
+                    }
+
+                    // ── Color mode row ─────────────────────────────────────
+                    CLAY(CLAY_ID("ColorRow"), {
+                        .layout = {
+                            .sizing         = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(W_ROW_H) },
+                            .childGap       = (uint16_t)W_CHILD_GAP,
+                            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                            .layoutDirection = CLAY_LEFT_TO_RIGHT
+                        }
+                    }) {
+                        CLAY_TEXT(CLAY_STRING("Color"),
+                            CLAY_TEXT_CONFIG({ .textColor = COL_TEXT_DIM, .fontSize = 13 }));
+
+                        const Clay_String colorLabels[3] = {
+                            CLAY_STRING("Rainbow"),
+                            CLAY_STRING("Velocity"),
+                            CLAY_STRING("Uniform")
+                        };
+                        for (int i = 0; i < 3; ++i) {
+                            CLAY(CLAY_IDI("ColBtn", i), {
+                                .layout = {
+                                    .sizing         = { CLAY_SIZING_FIXED(60.0f), CLAY_SIZING_FIXED(18.0f) },
+                                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                                },
+                                .backgroundColor = btnBg(colorMode == i, hovColor[i]),
+                                .cornerRadius    = CLAY_CORNER_RADIUS(3)
+                            }) {
+                                hovColor[i] = Clay_Hovered();
+                                if (hovColor[i] && inp.lmbPressed) colorMode = i;
+                                CLAY_TEXT(colorLabels[i],
+                                    CLAY_TEXT_CONFIG({ .textColor = COL_TEXT_HI, .fontSize = 11 }));
+                            }
+                        }
+                    }
+
+                    // ── Reset row ──────────────────────────────────────────
+                    CLAY(CLAY_ID("ResetRow"), {
+                        .layout = {
+                            .sizing         = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(30.0f) },
+                            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                            .layoutDirection = CLAY_LEFT_TO_RIGHT
+                        }
+                    }) {
+                        CLAY(CLAY_ID("ResetSpacer"), {
+                            .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } }
+                        }) {}
+
+                        CLAY(CLAY_ID("BtnReset"), {
+                            .layout = {
+                                .sizing         = { CLAY_SIZING_FIXED(100.0f), CLAY_SIZING_FIXED(26.0f) },
+                                .childAlignment = { .x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER }
+                            },
+                            .backgroundColor = hovReset ? COL_RESET_H : COL_RESET,
+                            .cornerRadius    = CLAY_CORNER_RADIUS(4)
+                        }) {
+                            hovReset = Clay_Hovered();
+                            if (hovReset && inp.lmbPressed) pendingReset = true;
+                            CLAY_TEXT(CLAY_STRING("Reset Particles"),
+                                CLAY_TEXT_CONFIG({ .textColor = {210, 200, 255, 255}, .fontSize = 12 }));
+                        }
+                    }
+
+                } // end content
+            } // end SettingsWin
+        } // end if settingsWin.open
+
+    } // end PRoot
 }
 
 // ─── cleanup ──────────────────────────────────────────────────────────────────
@@ -245,7 +558,6 @@ void Particles::createDrawPipeline(VulkanContext& ctx) {
     VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     cb.attachmentCount = 1; cb.pAttachments = &cba;
 
-    // Only create layout once
     if (drawPipeLayout == VK_NULL_HANDLE) {
         VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         li.setLayoutCount = 1;
@@ -277,7 +589,6 @@ void Particles::createDrawPipeline(VulkanContext& ctx) {
 void Particles::initParticles(VulkanContext& ctx) {
     VkDeviceSize size = sizeof(Particle) * PARTICLE_COUNT;
 
-    // Create host-visible staging buffer
     VkBuffer staging; VkDeviceMemory stagingMem;
     ctx.createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -288,27 +599,15 @@ void Particles::initParticles(VulkanContext& ctx) {
 
     std::mt19937 rng(42);
     std::uniform_real_distribution<float> posD(-1.0f, 1.0f);
-    std::uniform_real_distribution<float> velD(-0.01f, 0.01f);
+    std::uniform_real_distribution<float> velD(-0.02f, 0.02f);
 
     for (uint32_t i = 0; i < PARTICLE_COUNT; ++i) {
         particles[i].pos   = {posD(rng), posD(rng)};
         particles[i].vel   = {velD(rng), velD(rng)};
-        // Assign a rainbow hue based on index
-        float h = (float)i / PARTICLE_COUNT;
-        // HSV to RGB (simple version, S=1 V=1)
-        float r = std::abs(h * 6.0f - 3.0f) - 1.0f;
-        float g = 2.0f - std::abs(h * 6.0f - 2.0f);
-        float b = 2.0f - std::abs(h * 6.0f - 4.0f);
-        particles[i].color = {
-            std::clamp(r, 0.0f, 1.0f) * 0.8f,
-            std::clamp(g, 0.0f, 1.0f) * 0.8f,
-            std::clamp(b, 0.0f, 1.0f) * 0.8f,
-            1.0f
-        };
+        particles[i].color = {1.0f, 1.0f, 1.0f, 1.0f}; // compute shader overwrites every frame
     }
     vkUnmapMemory(ctx.device, stagingMem);
 
-    // Copy to device-local buffer
     auto cmd = ctx.beginOneTimeCommands();
     VkBufferCopy copy{0, 0, size};
     vkCmdCopyBuffer(cmd, staging, buffer, 1, &copy);
@@ -316,4 +615,6 @@ void Particles::initParticles(VulkanContext& ctx) {
 
     vkDestroyBuffer(ctx.device, staging, nullptr);
     vkFreeMemory(ctx.device, stagingMem, nullptr);
+
+    totalTime = 0.0f;
 }

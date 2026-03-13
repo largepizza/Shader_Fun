@@ -9,7 +9,7 @@ public:
     void onResize(VulkanContext& ctx) override;
     void recordCompute(VkCommandBuffer cmd, VulkanContext& ctx, float dt) override;
     void recordDraw   (VkCommandBuffer cmd, VulkanContext& ctx, float dt) override;
-    void buildUI(float dt) override;
+    void buildUI(float dt, UIRenderer& ui) override;
     VkClearValue clearColor() const override { return {{{0.02f, 0.02f, 0.05f, 1.0f}}}; }
     void cleanup(VkDevice device) override;
 

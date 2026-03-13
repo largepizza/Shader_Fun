@@ -58,21 +58,22 @@ void App::drawFrame() {
     float  dt  = std::min((float)(now - lastTime), 0.05f);
     lastTime   = now;
 
-    // Get current mouse state for Clay
+    // Get current mouse state
     double mx, my;
     glfwGetCursorPos(window, &mx, &my);
-    bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT)  == GLFW_PRESS;
+    bool rmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
     int  ww, wh;
     glfwGetWindowSize(window, &ww, &wh);
 
     // Prepare Clay layout for this frame — simulation may call CLAY() in buildUI()
     ui.beginFrame((float)ww, (float)wh,
-                  (float)mx, (float)my, lmb,
+                  (float)mx, (float)my, lmb, rmb,
                   scrollX, scrollY, dt);
     scrollX = scrollY = 0.0f; // consumed
 
-    // Let the simulation declare its UI elements inside Clay's layout pass
-    sim->buildUI(dt);
+    // Let the simulation declare its UI elements and read input state via ui.
+    sim->buildUI(dt, ui);
 
     // Record GPU commands
     vkResetFences(ctx.device, 1, &ctx.fenceFrame);

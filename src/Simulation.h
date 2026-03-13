@@ -3,6 +3,8 @@
 #include <GLFW/glfw3.h>
 #include "VulkanContext.h"
 
+class UIRenderer; // forward declare — simulations include UIRenderer.h in their .cpp
+
 // Abstract base class for all simulations.
 // To add a new simulation:
 //   1. Create MySimulation.h/.cpp in src/simulations/
@@ -33,9 +35,10 @@ public:
 
     // Declare Clay UI layout elements for this frame.
     // Called between UIRenderer::beginFrame() and UIRenderer::record().
+    // ui provides per-frame input state (mouse, buttons) and the mouse-capture API.
     // Use CLAY() and CLAY_TEXT() macros to emit layout elements.
     // Default implementation declares no UI.
-    virtual void buildUI(float dt) {}
+    virtual void buildUI(float dt, UIRenderer& ui) {}
 
     // Clear color used when App begins the render pass.
     virtual VkClearValue clearColor() const { return {{{0.0f, 0.0f, 0.0f, 1.0f}}}; }
