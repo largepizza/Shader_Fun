@@ -8,9 +8,11 @@ void App::run() {
     initWindow();
     ctx.init(window);
     sim->init(ctx);
+    ui.init(ctx);
     mainLoop();
     // Wait for GPU idle before tearing down
     vkDeviceWaitIdle(ctx.device);
+    ui.cleanup(ctx.device);
     sim->cleanup(ctx.device);
     ctx.cleanup();
     glfwDestroyWindow(window);
@@ -25,6 +27,7 @@ void App::initWindow() {
     glfwSetFramebufferSizeCallback(window, cbResize);
     glfwSetKeyCallback(window, cbKey);
     glfwSetCursorPosCallback(window, cbCursorPos);
+    glfwSetScrollCallback(window, cbScroll);
 }
 
 void App::mainLoop() {
@@ -44,25 +47,64 @@ void App::drawFrame() {
     if (res == VK_ERROR_OUT_OF_DATE_KHR) {
         ctx.recreateSwapchain(window);
         sim->onResize(ctx);
+        ui.onResize(ctx);
         return;
     }
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
         throw std::runtime_error("vkAcquireNextImageKHR failed.");
 
-    // Compute dt here so it reflects the true frame gap
+    // Compute dt
     double now = glfwGetTime();
-    float  dt  = std::min((float)(now - lastTime), 0.05f); // clamp to 50ms max
+    float  dt  = std::min((float)(now - lastTime), 0.05f);
     lastTime   = now;
 
+    // Get current mouse state for Clay
+    double mx, my;
+    glfwGetCursorPos(window, &mx, &my);
+    bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    int  ww, wh;
+    glfwGetWindowSize(window, &ww, &wh);
+
+    // Prepare Clay layout for this frame — simulation may call CLAY() in buildUI()
+    ui.beginFrame((float)ww, (float)wh,
+                  (float)mx, (float)my, lmb,
+                  scrollX, scrollY, dt);
+    scrollX = scrollY = 0.0f; // consumed
+
+    // Let the simulation declare its UI elements inside Clay's layout pass
+    sim->buildUI(dt);
+
+    // Record GPU commands
     vkResetFences(ctx.device, 1, &ctx.fenceFrame);
     vkResetCommandBuffer(ctx.commandBuffer, 0);
 
-    // Begin the command buffer, let the simulation fill it, then end it
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(ctx.commandBuffer, &bi);
-    sim->recordFrame(ctx.commandBuffer, ctx.framebuffers[imgIdx], ctx, dt);
+
+    // 1. Simulation compute work (before render pass)
+    sim->recordCompute(ctx.commandBuffer, ctx, dt);
+
+    // 2. Begin render pass — App now owns this
+    VkClearValue clear = sim->clearColor();
+    VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rbi.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rbi.renderPass      = ctx.renderPass;
+    rbi.framebuffer     = ctx.framebuffers[imgIdx];
+    rbi.renderArea      = {{0, 0}, ctx.swapExtent};
+    rbi.clearValueCount = 1;
+    rbi.pClearValues    = &clear;
+    vkCmdBeginRenderPass(ctx.commandBuffer, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+
+    // 3. Simulation draw calls (render pass is already open)
+    sim->recordDraw(ctx.commandBuffer, ctx, dt);
+
+    // 4. UI draws on top of the simulation
+    ui.record(ctx.commandBuffer, ctx);
+
+    vkCmdEndRenderPass(ctx.commandBuffer);
     vkEndCommandBuffer(ctx.commandBuffer);
 
+    // Submit
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.waitSemaphoreCount   = 1;
@@ -75,6 +117,7 @@ void App::drawFrame() {
     if (vkQueueSubmit(ctx.graphicsQueue, 1, &si, ctx.fenceFrame) != VK_SUCCESS)
         throw std::runtime_error("vkQueueSubmit failed.");
 
+    // Present
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
     pi.pWaitSemaphores    = &ctx.semRenderDone[imgIdx];
@@ -86,6 +129,7 @@ void App::drawFrame() {
         resized = false;
         ctx.recreateSwapchain(window);
         sim->onResize(ctx);
+        ui.onResize(ctx);
     }
 }
 
@@ -102,4 +146,10 @@ void App::cbKey(GLFWwindow* w, int key, int, int action, int) {
 
 void App::cbCursorPos(GLFWwindow* w, double x, double y) {
     reinterpret_cast<App*>(glfwGetWindowUserPointer(w))->sim->onCursorPos(w, x, y);
+}
+
+void App::cbScroll(GLFWwindow* w, double dx, double dy) {
+    auto* app = reinterpret_cast<App*>(glfwGetWindowUserPointer(w));
+    app->scrollX += (float)dx;
+    app->scrollY += (float)dy;
 }

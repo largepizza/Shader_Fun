@@ -20,8 +20,10 @@ public:
 
     void init(VulkanContext& ctx) override;
     void onResize(VulkanContext& ctx) override;
-    void recordFrame(VkCommandBuffer cmd, VkFramebuffer fb,
-                     VulkanContext& ctx, float dt) override;
+    void recordCompute(VkCommandBuffer cmd, VulkanContext& ctx, float dt) override;
+    void recordDraw   (VkCommandBuffer cmd, VulkanContext& ctx, float dt) override;
+    void buildUI(float dt) override;
+    VkClearValue clearColor() const override { return {{{0.01f, 0.01f, 0.02f, 1.0f}}}; }
     void cleanup(VkDevice device) override;
 
     void onCursorPos(GLFWwindow* window, double x, double y) override;

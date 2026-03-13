@@ -31,9 +31,30 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 
+# Clay UI layout library (single header)
+# Disable all example targets so Clay doesn't pull in SDL2, raylib, etc.
+set(CLAY_INCLUDE_ALL_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(CLAY_INCLUDE_DEMOS        OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    clay
+    GIT_REPOSITORY https://github.com/nicbarker/clay.git
+    GIT_TAG main
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(clay)
+
+# stb single-header libs (for stb_truetype)
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(stb)
+
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 add_executable(ShaderFun ${SOURCES})
-target_include_directories(ShaderFun PRIVATE src)
+target_include_directories(ShaderFun PRIVATE src ${clay_SOURCE_DIR} ${stb_SOURCE_DIR})
 target_link_libraries(ShaderFun PRIVATE Vulkan::Vulkan glfw glm::glm)
 
 # Shader compilation

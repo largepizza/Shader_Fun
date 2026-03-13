@@ -21,13 +21,24 @@ public:
     // Compute pipelines are viewport-independent and do NOT need recreation.
     virtual void onResize(VulkanContext& ctx) = 0;
 
-    // Record all GPU work for this frame into an already-begun command buffer.
-    // Responsible for: compute dispatch, pipeline barriers, begin/end render pass, draw calls.
+    // Record compute work into an already-begun command buffer, before the render pass.
+    // Default implementation does nothing (simulations with no compute override this).
     // dt = seconds since last frame.
-    virtual void recordFrame(VkCommandBuffer cmd,
-                              VkFramebuffer  framebuffer,
-                              VulkanContext& ctx,
-                              float          dt) = 0;
+    virtual void recordCompute(VkCommandBuffer cmd, VulkanContext& ctx, float dt) {}
+
+    // Record draw calls into an already-begun command buffer inside an open render pass.
+    // The render pass is begun and ended by App; do NOT call vkCmdBeginRenderPass here.
+    // dt = seconds since last frame.
+    virtual void recordDraw(VkCommandBuffer cmd, VulkanContext& ctx, float dt) = 0;
+
+    // Declare Clay UI layout elements for this frame.
+    // Called between UIRenderer::beginFrame() and UIRenderer::record().
+    // Use CLAY() and CLAY_TEXT() macros to emit layout elements.
+    // Default implementation declares no UI.
+    virtual void buildUI(float dt) {}
+
+    // Clear color used when App begins the render pass.
+    virtual VkClearValue clearColor() const { return {{{0.0f, 0.0f, 0.0f, 1.0f}}}; }
 
     // Called once before the device is destroyed. Release all Vulkan resources.
     virtual void cleanup(VkDevice device) = 0;

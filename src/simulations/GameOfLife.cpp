@@ -3,6 +3,10 @@
 #include <random>
 #include <stdexcept>
 
+// clay.h is a single-header library; CLAY_IMPLEMENTATION is defined only in UIRenderer.cpp.
+// Include here without the implementation define so we can use the CLAY macros.
+#include "clay.h"
+
 // ─── init ─────────────────────────────────────────────────────────────────────
 void GameOfLife::init(VulkanContext& ctx) {
     createImages(ctx);
@@ -21,17 +25,16 @@ void GameOfLife::onResize(VulkanContext& ctx) {
     createDisplayPipeline(ctx);
 }
 
-// ─── recordFrame ──────────────────────────────────────────────────────────────
-void GameOfLife::recordFrame(VkCommandBuffer cmd, VkFramebuffer fb,
-                              VulkanContext& ctx, float /*dt*/) {
-    // Handle pending randomize request — safe because beginOneTimeCommands
-    // submits and waits synchronously before any work is added to cmd.
+// ─── recordCompute ────────────────────────────────────────────────────────────
+void GameOfLife::recordCompute(VkCommandBuffer cmd, VulkanContext& ctx, float /*dt*/) {
+    // Handle pending randomize request — beginOneTimeCommands submits and waits
+    // synchronously so it is safe here before we add any work to cmd.
     if (pendingRandomize) {
         pendingRandomize = false;
         randomize(ctx);
     }
 
-    // ── Compute pass: GoL step ─────────────────────────────────────────────
+    // GoL compute step
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
         compPipeLayout, 0, 1, &compSet[current], 0, nullptr);
@@ -40,34 +43,58 @@ void GameOfLife::recordFrame(VkCommandBuffer cmd, VkFramebuffer fb,
     uint32_t gy = (GOL_H + 15) / 16;
     vkCmdDispatch(cmd, gx, gy, 1);
 
-    // ── Barrier: compute write → fragment read ─────────────────────────────
-    // The "next" image (1-current) was just written, now needs to be readable
+    // Barrier: compute write → fragment read on the newly written image
     ctx.imageBarrier(cmd, image[1 - current],
         VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
-    // ── Render pass: display result ────────────────────────────────────────
-    VkClearValue clear{{{0.02f, 0.02f, 0.05f, 1.0f}}};
-    VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rbi.renderPass      = ctx.renderPass;
-    rbi.framebuffer     = fb;
-    rbi.renderArea      = {{0, 0}, ctx.swapExtent};
-    rbi.clearValueCount = 1;
-    rbi.pClearValues    = &clear;
-    vkCmdBeginRenderPass(cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dispPipeline);
-    // Display the "next" image (just computed), which is image[1-current]
-    // dispSet[i] samples from image[i], so we want dispSet[1-current]
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-        dispPipeLayout, 0, 1, &dispSet[1 - current], 0, nullptr);
-    vkCmdDraw(cmd, 3, 1, 0, 0); // fullscreen triangle
-
-    vkCmdEndRenderPass(cmd);
-
-    // Advance ping-pong
+    // Advance ping-pong so recordDraw samples the just-computed image
     current = 1 - current;
+}
+
+// ─── recordDraw ───────────────────────────────────────────────────────────────
+// The render pass is already open when this is called; do NOT begin/end it here.
+void GameOfLife::recordDraw(VkCommandBuffer cmd, VulkanContext& ctx, float /*dt*/) {
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dispPipeline);
+    // current was flipped in recordCompute, so image[current] is the live (just computed) image.
+    // dispSet[i] samples from image[i].
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        dispPipeLayout, 0, 1, &dispSet[current], 0, nullptr);
+    vkCmdDraw(cmd, 3, 1, 0, 0); // fullscreen triangle — no VBO needed
+}
+
+// ─── buildUI ──────────────────────────────────────────────────────────────────
+void GameOfLife::buildUI(float /*dt*/) {
+    // Full-screen invisible root container (required by Clay as the layout root)
+    CLAY(CLAY_ID("GolRoot"), {
+        .layout = {
+            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
+            .padding = CLAY_PADDING_ALL(12)
+        }
+    }) {
+        // Info panel anchored to the top-left corner
+        CLAY(CLAY_ID("GolInfoPanel"), {
+            .layout = {
+                .sizing = {
+                    .width  = CLAY_SIZING_FIXED(220),
+                    .height = CLAY_SIZING_FIT(0)
+                },
+                .padding         = CLAY_PADDING_ALL(10),
+                .childGap        = 6,
+                .layoutDirection = CLAY_TOP_TO_BOTTOM
+            },
+            .backgroundColor = { 15, 15, 25, 200 },
+            .cornerRadius    = CLAY_CORNER_RADIUS(6)
+        }) {
+            CLAY_TEXT(CLAY_STRING("Game of Life"),
+                CLAY_TEXT_CONFIG({ .textColor = {100, 220, 150, 255}, .fontSize = 18 }));
+            CLAY_TEXT(CLAY_STRING("512 x 512 grid"),
+                CLAY_TEXT_CONFIG({ .textColor = {180, 180, 180, 255}, .fontSize = 14 }));
+            CLAY_TEXT(CLAY_STRING("SPACE  randomize"),
+                CLAY_TEXT_CONFIG({ .textColor = {120, 120, 140, 255}, .fontSize = 13 }));
+        }
+    }
 }
 
 // ─── cleanup ──────────────────────────────────────────────────────────────────

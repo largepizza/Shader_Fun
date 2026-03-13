@@ -4,6 +4,10 @@
 #include <random>
 #include <stdexcept>
 
+// clay.h is a single-header library; CLAY_IMPLEMENTATION is defined only in UIRenderer.cpp.
+// Include here without the implementation define so we can use the CLAY macros.
+#include "clay.h"
+
 // ─── init ─────────────────────────────────────────────────────────────────────
 void Particles::init(VulkanContext& ctx) {
     createParticleBuffer(ctx);
@@ -21,9 +25,8 @@ void Particles::onResize(VulkanContext& ctx) {
     createDrawPipeline(ctx);
 }
 
-// ─── recordFrame ──────────────────────────────────────────────────────────────
-void Particles::recordFrame(VkCommandBuffer cmd, VkFramebuffer fb,
-                             VulkanContext& ctx, float dt) {
+// ─── recordCompute ────────────────────────────────────────────────────────────
+void Particles::recordCompute(VkCommandBuffer cmd, VulkanContext& ctx, float dt) {
     totalTime += dt;
 
     ParticlePushConstants pc{};
@@ -31,16 +34,16 @@ void Particles::recordFrame(VkCommandBuffer cmd, VkFramebuffer fb,
     pc.time     = totalTime;
     pc.mouseNDC = mouseNDC;
 
-    // ── Compute pass: update particles ────────────────────────────────────
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
         compPipeLayout, 0, 1, &descSet, 0, nullptr);
     vkCmdPushConstants(cmd, compPipeLayout, VK_SHADER_STAGE_COMPUTE_BIT,
         0, sizeof(pc), &pc);
+
     uint32_t groups = (PARTICLE_COUNT + 255) / 256;
     vkCmdDispatch(cmd, groups, 1, 1);
 
-    // ── Barrier: compute write → vertex read ──────────────────────────────
+    // Barrier: compute write → vertex shader read
     VkBufferMemoryBarrier bmb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
     bmb.srcAccessMask       = VK_ACCESS_SHADER_WRITE_BIT;
     bmb.dstAccessMask       = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
@@ -53,23 +56,48 @@ void Particles::recordFrame(VkCommandBuffer cmd, VkFramebuffer fb,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         0, 0, nullptr, 1, &bmb, 0, nullptr);
+}
 
-    // ── Render pass: draw particles ───────────────────────────────────────
-    VkClearValue clear{{{0.01f, 0.01f, 0.02f, 1.0f}}};
-    VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rbi.renderPass      = ctx.renderPass;
-    rbi.framebuffer     = fb;
-    rbi.renderArea      = {{0, 0}, ctx.swapExtent};
-    rbi.clearValueCount = 1;
-    rbi.pClearValues    = &clear;
-    vkCmdBeginRenderPass(cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
-
+// ─── recordDraw ───────────────────────────────────────────────────────────────
+// The render pass is already open when this is called; do NOT begin/end it here.
+void Particles::recordDraw(VkCommandBuffer cmd, VulkanContext& ctx, float /*dt*/) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, drawPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
         drawPipeLayout, 0, 1, &descSet, 0, nullptr);
     vkCmdDraw(cmd, PARTICLE_COUNT, 1, 0, 0);
+}
 
-    vkCmdEndRenderPass(cmd);
+// ─── buildUI ──────────────────────────────────────────────────────────────────
+void Particles::buildUI(float /*dt*/) {
+    // Full-screen invisible root container (required by Clay as the layout root)
+    CLAY(CLAY_ID("ParticlesRoot"), {
+        .layout = {
+            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
+            .padding = CLAY_PADDING_ALL(12)
+        }
+    }) {
+        // Info panel anchored to the top-left corner
+        CLAY(CLAY_ID("ParticlesInfoPanel"), {
+            .layout = {
+                .sizing = {
+                    .width  = CLAY_SIZING_FIXED(220),
+                    .height = CLAY_SIZING_FIT(0)
+                },
+                .padding         = CLAY_PADDING_ALL(10),
+                .childGap        = 6,
+                .layoutDirection = CLAY_TOP_TO_BOTTOM
+            },
+            .backgroundColor = { 10, 10, 20, 200 },
+            .cornerRadius    = CLAY_CORNER_RADIUS(6)
+        }) {
+            CLAY_TEXT(CLAY_STRING("Particles"),
+                CLAY_TEXT_CONFIG({ .textColor = {100, 160, 255, 255}, .fontSize = 18 }));
+            CLAY_TEXT(CLAY_STRING("500 000 particles"),
+                CLAY_TEXT_CONFIG({ .textColor = {180, 180, 180, 255}, .fontSize = 14 }));
+            CLAY_TEXT(CLAY_STRING("Mouse  attract"),
+                CLAY_TEXT_CONFIG({ .textColor = {120, 120, 140, 255}, .fontSize = 13 }));
+        }
+    }
 }
 
 // ─── cleanup ──────────────────────────────────────────────────────────────────
