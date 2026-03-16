@@ -1,0 +1,91 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Cell layout (RGBA32F): r=activation, g=weight, b=eligibility_trace, a=bias
+layout(set = 0, binding = 0, rgba32f) uniform readonly  image2D src;
+layout(set = 0, binding = 1, rgba32f) uniform writeonly image2D dst;
+
+layout(set = 0, binding = 2, std430) readonly buffer PongBuf {
+    float ball_x;
+    float ball_y;
+    float ball_vx;
+    float ball_vy;
+    float ai_paddle_y;
+    float opp_paddle_y;
+    float reward;
+    int   ai_score;
+    int   opp_score;
+    float rewardDisplay;
+} pong;
+
+layout(push_constant) uniform PC {
+    float time;
+    float learnRate;
+    float traceDecay;  // eligibility trace decay (e.g. 0.95)
+    int   gridW;
+    int   gridH;
+    int   step;
+} pc;
+
+// Neighbor offsets: NW N NE / W . E / SW S SE
+const ivec2 off[8] = ivec2[8](
+    ivec2(-1,-1), ivec2(0,-1), ivec2(1,-1),
+    ivec2(-1, 0),              ivec2(1, 0),
+    ivec2(-1, 1), ivec2(0, 1), ivec2(1, 1)
+);
+// Left→right directional bias: left neighbours are stronger sources of signal
+const float fwdW[8] = float[8](
+    4.2, 1.0, 0.5,
+    4.5,       0.3,
+    4.2, 1.0, 0.5
+);
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.gridW || p.y >= pc.gridH) return;
+
+    vec4  self  = imageLoad(src, p);
+    float weight = self.g;
+    float trace  = self.b;  // eligibility trace
+    float bias   = self.a;
+
+    // ── Input column (x=0): Gaussian bump encoding ball Y position ────────────
+    if (p.x == 0) {
+        float rowNorm  = float(p.y) / float(pc.gridH - 1);
+        float dist     = rowNorm - pong.ball_y;
+        float newAct   = exp(-dist * dist * 50.0);  // sigma = 0.1
+        float newTrace = pc.traceDecay * trace + (1.0 - pc.traceDecay) * newAct;
+        imageStore(dst, p, vec4(newAct, 1.0, newTrace, bias));
+        return;
+    }
+
+    // ── Accumulate potential from 8 neighbours ────────────────────────────────
+    float potential = 0.0;
+    float wSum      = 0.0;
+    for (int i = 0; i < 8; i++) {
+        ivec2 np = p + off[i];
+        if (np.x < 0 || np.x >= pc.gridW || np.y < 0 || np.y >= pc.gridH) continue;
+        vec4 nb = imageLoad(src, np);
+        potential += nb.r * nb.g * fwdW[i];
+        wSum      += fwdW[i];
+    }
+    potential = (wSum > 0.0) ? potential / wSum : 0.0;
+
+    // ── Activation: sigmoid with gain 5 ──────────────────────────────────────
+    float newAct = 1.0 / (1.0 + exp(-(potential - bias) * 5.0));
+
+    // ── Eligibility trace: decaying memory of recent activation ───────────────
+    // This bridges the timing gap between action and reward.
+    float newTrace = pc.traceDecay * trace + (1.0 - pc.traceDecay) * newAct;
+
+    // ── Three-factor weight update: trace × global reward ─────────────────────
+    // Neurons recently active during a positive reward event strengthen;
+    // those active during negative reward weaken. No per-cell target.
+    float dw        = pc.learnRate * newTrace * pong.reward;
+    float newWeight = clamp(weight + dw, 0.02, 0.98);
+
+    // ── Bias: very slow decay toward zero ─────────────────────────────────────
+    float newBias = bias * 0.99999;
+
+    imageStore(dst, p, vec4(newAct, newWeight, newTrace, newBias));
+}

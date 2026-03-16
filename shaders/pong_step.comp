@@ -1,0 +1,120 @@
+#version 450
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+// Current neural grid — read output (right) column to decode paddle direction
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D neuralGrid;
+
+layout(set = 0, binding = 1, std430) buffer PongBuf {
+    float ball_x;
+    float ball_y;
+    float ball_vx;
+    float ball_vy;
+    float ai_paddle_y;
+    float opp_paddle_y;
+    float reward;
+    int   ai_score;
+    int   opp_score;
+    float rewardDisplay;
+} pong;
+
+layout(push_constant) uniform PC {
+    float   dt;
+    float   paddleH;      // half-height in [0,1]
+    float   paddleSpeed;  // units per second
+    float   ballSpeed;    // base ball speed
+    int     gridW;
+    int     gridH;
+} pc;
+
+const float PADDLE_X_AI  = 0.05;
+const float PADDLE_X_OPP = 0.95;
+const float PADDLE_W     = 0.018;
+const float BALL_R       = 0.018;
+const float MAX_SPEED    = 0.85;
+
+void main() {
+    // ── Decay display reward ──────────────────────────────────────────────────
+    pong.rewardDisplay *= 0.82;
+
+    // ── Decode neural output column: right column (x = gridW-1) ──────────────
+    // Top half rows → "move up" signal, bottom half → "move down" signal
+    int   halfH   = pc.gridH / 2;
+    float sumUp   = 0.0;
+    float sumDown = 0.0;
+    for (int y = 0; y < pc.gridH; ++y) {
+        float act = imageLoad(neuralGrid, ivec2(pc.gridW - 1, y)).r;
+        if (y < halfH) sumUp   += act;
+        else           sumDown += act;
+    }
+    sumUp   /= float(halfH);
+    sumDown /= float(pc.gridH - halfH);
+
+    // Positive netDir → move down (y increases downward in UV space)
+    float netDir = sumDown - sumUp;
+    pong.ai_paddle_y = clamp(pong.ai_paddle_y + netDir * pc.paddleSpeed * pc.dt, 0.0, 1.0);
+
+    // ── Opponent: imperfect tracker (slightly slower than ball) ───────────────
+    float oppDir   = sign(pong.ball_y - pong.opp_paddle_y);
+    float oppSpeed = pc.ballSpeed * 0.80;
+    pong.opp_paddle_y = clamp(pong.opp_paddle_y + oppDir * oppSpeed * pc.dt, 0.0, 1.0);
+
+    // ── Ball physics ──────────────────────────────────────────────────────────
+    pong.ball_x += pong.ball_vx * pc.dt;
+    pong.ball_y += pong.ball_vy * pc.dt;
+
+    // Wall bounce (top / bottom)
+    if (pong.ball_y <= BALL_R)        { pong.ball_y =        BALL_R; pong.ball_vy =  abs(pong.ball_vy); }
+    if (pong.ball_y >= 1.0 - BALL_R)  { pong.ball_y = 1.0 - BALL_R; pong.ball_vy = -abs(pong.ball_vy); }
+
+    // ── Paddle collisions ─────────────────────────────────────────────────────
+    pong.reward = 0.0;
+
+    // AI paddle (left side)
+    if (pong.ball_vx < 0.0 && pong.ball_x - BALL_R <= PADDLE_X_AI + PADDLE_W) {
+        if (abs(pong.ball_y - pong.ai_paddle_y) < pc.paddleH) {
+            float relY   = (pong.ball_y - pong.ai_paddle_y) / pc.paddleH;
+            pong.ball_vx = abs(pong.ball_vx) * 1.05;
+            pong.ball_vy = relY * pc.ballSpeed;
+            pong.ball_x  = PADDLE_X_AI + PADDLE_W + BALL_R;
+            pong.reward        =  1.0;
+            pong.rewardDisplay =  1.0;
+            pong.ai_score++;
+        }
+    }
+
+    // Opponent paddle (right side)
+    if (pong.ball_vx > 0.0 && pong.ball_x + BALL_R >= PADDLE_X_OPP - PADDLE_W) {
+        if (abs(pong.ball_y - pong.opp_paddle_y) < pc.paddleH) {
+            float relY   = (pong.ball_y - pong.opp_paddle_y) / pc.paddleH;
+            pong.ball_vx = -abs(pong.ball_vx) * 1.05;
+            pong.ball_vy = relY * pc.ballSpeed;
+            pong.ball_x  = PADDLE_X_OPP - PADDLE_W - BALL_R;
+        }
+    }
+
+    // Speed cap
+    float spd = length(vec2(pong.ball_vx, pong.ball_vy));
+    if (spd > MAX_SPEED) {
+        pong.ball_vx *= MAX_SPEED / spd;
+        pong.ball_vy *= MAX_SPEED / spd;
+    }
+
+    // ── Miss / reset ──────────────────────────────────────────────────────────
+    if (pong.ball_x < 0.0) {
+        pong.opp_score++;
+        pong.reward        = -1.0;
+        pong.rewardDisplay = -1.0;
+        pong.ball_x = 0.5; pong.ball_y = 0.5;
+        pong.ball_vx = -pc.ballSpeed;
+        pong.ball_vy =  0.05;
+        pong.ai_paddle_y  = 0.5;
+        pong.opp_paddle_y = 0.5;
+    }
+    if (pong.ball_x > 1.0) {
+        pong.ball_x = 0.5; pong.ball_y = 0.5;
+        pong.ball_vx =  pc.ballSpeed;
+        pong.ball_vy = -0.25;
+        pong.ai_paddle_y  = 0.5;
+        pong.opp_paddle_y = 0.5;
+    }
+}
