@@ -5,7 +5,8 @@
       "Bash(cmake -B build -S .)",
       "Bash(cmake --build build --config Debug)",
       "Bash(cmake -B build -S C:/Code/Shader_Fun -DCMAKE_POLICY_VERSION_MINIMUM=3.5)",
-      "Bash(cmake -B C:/Code/Shader_Fun/build -S C:/Code/Shader_Fun)"
+      "Bash(cmake -B C:/Code/Shader_Fun/build -S C:/Code/Shader_Fun)",
+      "Bash(ls -1 /c/Code/Shader_Fun/*.md)"
     ]
   }
 }

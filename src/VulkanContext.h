@@ -50,6 +50,12 @@ struct VulkanContext {
     VkRenderPass                renderPass = VK_NULL_HANDLE;
     std::vector<VkFramebuffer>  framebuffers;
 
+    // ── Depth buffer (shared; recreated on resize) ─────────────────────────
+    VkImage        depthImage  = VK_NULL_HANDLE;
+    VkDeviceMemory depthMemory = VK_NULL_HANDLE;
+    VkImageView    depthView   = VK_NULL_HANDLE;
+    VkFormat       depthFormat = VK_FORMAT_D32_SFLOAT;
+
     // ── Commands & sync ────────────────────────────────────────────────────
     VkCommandPool            commandPool        = VK_NULL_HANDLE;
     VkCommandBuffer          commandBuffer      = VK_NULL_HANDLE;
@@ -86,11 +92,14 @@ private:
     void createDevice();
     void createSwapchain(GLFWwindow* window);
     void createRenderPass();
+    void createDepthResources();
+    void destroyDepthResources();
     void createFramebuffers();
     void createCommandPool();
     void createCommandBuffer();
     void createSyncObjects();
     void cleanupSwapchain();
+    VkFormat findDepthFormat();
 
     QueueFamilyIndices findQueueFamilies(VkPhysicalDevice pd);
     SwapchainDetails   querySwapchainDetails(VkPhysicalDevice pd);

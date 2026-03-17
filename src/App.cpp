@@ -86,14 +86,16 @@ void App::drawFrame() {
     sim->recordCompute(ctx.commandBuffer, ctx, dt);
 
     // 2. Begin render pass — App now owns this
-    VkClearValue clear = sim->clearColor();
+    VkClearValue clearValues[2];
+    clearValues[0] = sim->clearColor();
+    clearValues[1].depthStencil = {1.0f, 0};   // far depth = 1.0
     VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rbi.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rbi.renderPass      = ctx.renderPass;
     rbi.framebuffer     = ctx.framebuffers[imgIdx];
     rbi.renderArea      = {{0, 0}, ctx.swapExtent};
-    rbi.clearValueCount = 1;
-    rbi.pClearValues    = &clear;
+    rbi.clearValueCount = 2;
+    rbi.pClearValues    = clearValues;
     vkCmdBeginRenderPass(ctx.commandBuffer, &rbi, VK_SUBPASS_CONTENTS_INLINE);
 
     // 3. Simulation draw calls (render pass is already open)
