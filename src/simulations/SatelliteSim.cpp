@@ -8,12 +8,14 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <algorithm>
 #include <stdexcept>
 
 // ── Earth + observer constants ─────────────────────────────────────────────────
 static constexpr float kEarthRadius = 6'371'000.0f; // mean Earth radius (m)
 static constexpr double kOmegaEarth = 7.2921150e-5; // sidereal rotation rate (rad/s)
-static constexpr float kObsLat = 0.785398f;         // observer geodetic latitude (45°N)
+static constexpr float kObsLatDeg = 37;
+static constexpr float kObsLat = glm::radians(kObsLatDeg);
 
 // ── Orbital mechanics ─────────────────────────────────────────────────────────
 static constexpr double kGM = 3.986004418e14; // Earth gravitational parameter (m³/s²)
@@ -34,6 +36,16 @@ void SatelliteSim::init(VulkanContext &ctx)
         auto j2000 = std::chrono::system_clock::from_time_t(946728000);
         simTime = std::chrono::duration<double>(now - j2000).count();
     }
+
+    ctx_ = &ctx;
+
+    keybindings = {
+        {"Toggle UI", GLFW_KEY_TAB, false},
+        {"Pause/Resume", GLFW_KEY_SPACE, false},
+        {"Slow Down", GLFW_KEY_COMMA, false},
+        {"Speed Up", GLFW_KEY_PERIOD, false},
+        {"Reverse Time", GLFW_KEY_R, false},
+    };
 
     createBuffers(ctx);
     createDescriptors(ctx);
@@ -64,7 +76,8 @@ void SatelliteSim::onResize(VulkanContext &ctx)
 // ─── recordCompute ────────────────────────────────────────────────────────────
 void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float dt)
 {
-    simTime += (double)dt * kTimeScales[timeScaleIdx];
+    if (!timePaused)
+        simTime += (double)dt * kTimeScales[timeScaleIdx] * timeDir;
     updatePositions(simTime);
     updateStars();
 
@@ -150,6 +163,48 @@ void SatelliteSim::recordDraw(VkCommandBuffer cmd, VulkanContext &ctx, float /*d
     }
 }
 
+// Icon index constants (match order passed to ui.loadIcons)
+static constexpr int kIconAngleLeft = 0;  // pixel--angle-left.png  → slow down
+static constexpr int kIconAngleRight = 1; // pixel--angle-right.png → speed up
+// 2 = controller (unused in time controls)
+static constexpr int kIconPause = 3;    // pixel--pause.png
+static constexpr int kIconPlay = 4;     // pixel--play.png
+static constexpr int kIconSettings = 5; // pixel--settings.png
+
+// Helper: short display name for a GLFW key code (used in settings window).
+static const char *keyDisplayName(int key)
+{
+    switch (key)
+    {
+    case GLFW_KEY_SPACE:
+        return "Space";
+    case GLFW_KEY_TAB:
+        return "Tab";
+    case GLFW_KEY_COMMA:
+        return ",";
+    case GLFW_KEY_PERIOD:
+        return ".";
+    case GLFW_KEY_ESCAPE:
+        return "Esc";
+    case GLFW_KEY_ENTER:
+        return "Enter";
+    default:
+        if (key >= GLFW_KEY_A && key <= GLFW_KEY_Z)
+        {
+            static char buf[2] = {};
+            buf[0] = (char)('A' + (key - GLFW_KEY_A));
+            return buf;
+        }
+        if (key >= GLFW_KEY_0 && key <= GLFW_KEY_9)
+        {
+            static char buf[2] = {};
+            buf[0] = (char)('0' + (key - GLFW_KEY_0));
+            return buf;
+        }
+        return "?";
+    }
+}
+
 // ─── buildUI ──────────────────────────────────────────────────────────────────
 void SatelliteSim::buildUI(float dt, UIRenderer &ui)
 {
@@ -160,10 +215,34 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
 
     const UIInput &inp = ui.input();
 
+    // ── Lazy icon loading (first buildUI call after init) ─────────────────────
+    if (!iconsLoaded && ctx_)
+    {
+        const char *iconPaths[] = {
+            "assets/icons/ui/pixel--angle-left.png",
+            "assets/icons/ui/pixel--angle-right.png",
+            "assets/icons/ui/pixel--controller.png",
+            "assets/icons/ui/pixel--pause.png",
+            "assets/icons/ui/pixel--play.png",
+            "assets/icons/ui/pixel--settings.png",
+        };
+        ui.loadIcons(*ctx_, iconPaths, 6);
+        iconsLoaded = true;
+    }
+
+    // ── Scroll wheel → FOV zoom (when not hovering over UI panels) ───────────
+    if (inp.scrollY != 0.0f && !ui.mouseOverUI())
+    {
+        camera.fovYDeg = glm::clamp(camera.fovYDeg - inp.scrollY * 3.0f, 10.0f, 120.0f);
+    }
+
+    // ── Tab: skip all UI when hidden ─────────────────────────────────────────
+    if (!uiVisible)
+        return;
+
     // ── Simulated UTC time string ─────────────────────────────────────────────
     static char timeBuf[32];
     {
-        // simTime = seconds since J2000.0 (2000-01-01 12:00 UTC = Unix 946728000).
         time_t unixSim = (time_t)(simTime) + 946728000;
         struct tm *utc = gmtime(&unixSim);
         if (utc)
@@ -187,12 +266,10 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
         CLAY_TEXT(CLAY_STRING("Satellite Constellation"),
                   CLAY_TEXT_CONFIG({.textColor = {200, 220, 255, 255}, .fontSize = 18}));
 
-        // UTC date/time
         Clay_String timeStr{false, (int32_t)strlen(timeBuf), timeBuf};
         CLAY_TEXT(timeStr,
                   CLAY_TEXT_CONFIG({.textColor = {160, 200, 160, 220}, .fontSize = 13}));
 
-        // Visible satellite count
         static char visBuf[48];
         snprintf(visBuf, sizeof(visBuf), "%u / %u satellites visible",
                  visibleCount, activeSatCount);
@@ -200,7 +277,6 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
         CLAY_TEXT(visStr,
                   CLAY_TEXT_CONFIG({.textColor = {140, 170, 220, 220}, .fontSize = 13}));
 
-        // Sun elevation
         static char sunBuf[32];
         float sunElDeg = glm::degrees(asinf(glm::clamp(sunDirENU.w, -1.0f, 1.0f)));
         snprintf(sunBuf, sizeof(sunBuf), "Sun elev  %.1f°", sunElDeg);
@@ -210,7 +286,6 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
         Clay_String sunStr{false, (int32_t)strlen(sunBuf), sunBuf};
         CLAY_TEXT(sunStr, CLAY_TEXT_CONFIG({.textColor = sunCol, .fontSize = 13}));
 
-        // Camera state
         Clay_Color camCol = camera.captured
                                 ? Clay_Color{100, 255, 120, 255}
                                 : Clay_Color{160, 160, 190, 220};
@@ -219,7 +294,6 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                       : CLAY_STRING("Camera: free  (Right-click to capture)"),
                   CLAY_TEXT_CONFIG({.textColor = camCol, .fontSize = 13}));
 
-        // FPS
         static char fpsBuf[24];
         snprintf(fpsBuf, sizeof(fpsBuf), "%.0f fps", dt > 0.0f ? 1.0f / dt : 0.0f);
         Clay_String fpsStr{false, (int32_t)strlen(fpsBuf), fpsBuf};
@@ -240,13 +314,11 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
         CLAY_TEXT(CLAY_STRING("Constellations"),
                   CLAY_TEXT_CONFIG({.textColor = {200, 220, 255, 255}, .fontSize = 15}));
 
-        static char constNameBuf[8][32];
-        static char constCntBuf[8][16];
+        static char constCntBuf[10][16];
 
-        for (int ci = 0; ci < (int)constellations.size() && ci < 8; ++ci)
+        for (int ci = 0; ci < (int)constellations.size() && ci < 10; ++ci)
         {
             ConstellationConfig &c = constellations[ci];
-
             snprintf(constCntBuf[ci], sizeof(constCntBuf[ci]), "%u", c.orbitCount);
 
             Clay_Color rowBg = c.enabled
@@ -262,7 +334,6 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                             .backgroundColor = rowBg,
                                             .cornerRadius = CLAY_CORNER_RADIUS(3)})
             {
-                // Toggle button
                 Clay_Color btnBg = c.enabled
                                        ? Clay_Color{30, 130, 60, 240}
                                        : (hovConst[ci] ? Clay_Color{80, 40, 40, 230} : Clay_Color{55, 25, 25, 210});
@@ -279,7 +350,6 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                               CLAY_TEXT_CONFIG({.textColor = {220, 230, 255, 255}, .fontSize = 10}));
                 }
 
-                // Name (fixed-width container so row doesn't jitter on toggle)
                 CLAY(CLAY_IDI("ConstName", ci), {.layout = {
                                                      .sizing = {CLAY_SIZING_FIXED(100), CLAY_SIZING_FIT(0)}}})
                 {
@@ -288,7 +358,6 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                               CLAY_TEXT_CONFIG({.textColor = {180, 200, 240, 220}, .fontSize = 13}));
                 }
 
-                // Orbit count
                 Clay_String cntStr{false, (int32_t)strlen(constCntBuf[ci]), constCntBuf[ci]};
                 CLAY_TEXT(cntStr,
                           CLAY_TEXT_CONFIG({.textColor = {110, 130, 170, 180}, .fontSize = 11}));
@@ -297,6 +366,11 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
     }
 
     // ── Time controls (bottom-left) ───────────────────────────────────────────
+    // Shows UTC time, a slow/pause|play/fast icon button row, speed label, and reverse indicator.
+    static char speedBuf[24];
+    snprintf(speedBuf, sizeof(speedBuf), "%s%s",
+             timeDir < 0.0f ? "REV " : "", kTimeLabels[timeScaleIdx]);
+
     CLAY(CLAY_ID("TimePanel"), {.layout = {
                                     .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
                                     .padding = {10, 10, 8, 8},
@@ -304,44 +378,270 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                     .layoutDirection = CLAY_TOP_TO_BOTTOM},
                                 .backgroundColor = {8, 10, 20, 210},
                                 .cornerRadius = CLAY_CORNER_RADIUS(6),
-                                .floating = {.offset = {12, inp.screenH - 100.0f}, .zIndex = 5, .attachTo = CLAY_ATTACH_TO_ROOT}})
+                                .floating = {.offset = {12, inp.screenH - 110.0f}, .zIndex = 5, .attachTo = CLAY_ATTACH_TO_ROOT}})
     {
-        CLAY_TEXT(CLAY_STRING("Time scale  (T = cycle)"),
-                  CLAY_TEXT_CONFIG({.textColor = {160, 160, 200, 200}, .fontSize = 12}));
-
-        // Speed buttons row
-        CLAY(CLAY_ID("SpeedRow"), {.layout = {
-                                       .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
-                                       .childGap = 4,
-                                       .layoutDirection = CLAY_LEFT_TO_RIGHT}})
+        // UTC time + speed indicator in one row
+        CLAY(CLAY_ID("TimeHeaderRow"), {.layout = {
+                                            .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                                            .childGap = 8,
+                                            .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                            .layoutDirection = CLAY_LEFT_TO_RIGHT}})
         {
-            for (int i = 0; i < kNumTimeScales; ++i)
+            Clay_String timeStr{false, (int32_t)strlen(timeBuf), timeBuf};
+            CLAY_TEXT(timeStr,
+                      CLAY_TEXT_CONFIG({.textColor = {160, 200, 160, 220}, .fontSize = 12}));
+
+            // Speed / direction label
+            Clay_Color speedCol = timePaused       ? Clay_Color{200, 100, 60, 220}
+                                  : timeDir < 0.0f ? Clay_Color{180, 120, 255, 220}
+                                                   : Clay_Color{120, 200, 255, 220};
+            Clay_String speedStr{false, (int32_t)strlen(speedBuf), speedBuf};
+            CLAY_TEXT(speedStr, CLAY_TEXT_CONFIG({.textColor = speedCol, .fontSize = 12}));
+        }
+
+        // Icon button row: [◀] [⏸/▶] [▶]
+        const int kBtnSize = 28;
+        const int kIconSize = 18;
+        CLAY(CLAY_ID("TimeBtnRow"), {.layout = {
+                                         .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
+                                         .childGap = 5,
+                                         .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                         .layoutDirection = CLAY_LEFT_TO_RIGHT}})
+        {
+            // ── Slow down ─────────────────────────────────────────────────────
+            Clay_Color slowBg = hovTimeSlower ? Clay_Color{60, 60, 100, 230} : Clay_Color{30, 30, 55, 210};
+            CLAY(CLAY_ID("TimeSlowerBtn"), {.layout = {
+                                                .sizing = {CLAY_SIZING_FIXED(kBtnSize), CLAY_SIZING_FIXED(kBtnSize)},
+                                                .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                            .backgroundColor = slowBg,
+                                            .cornerRadius = CLAY_CORNER_RADIUS(4)})
             {
-                bool active = (i == timeScaleIdx);
-                Clay_Color bg = active
-                                    ? Clay_Color{40, 100, 200, 240}
-                                    : (hovSpeed[i] ? Clay_Color{48, 48, 75, 230} : Clay_Color{28, 28, 48, 210});
-                CLAY(CLAY_IDI("SpeedBtn", i), {.layout = {
-                                                   .sizing = {CLAY_SIZING_FIXED(36), CLAY_SIZING_FIXED(22)},
-                                                   .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
-                                               .backgroundColor = bg,
-                                               .cornerRadius = CLAY_CORNER_RADIUS(3)})
+                hovTimeSlower = Clay_Hovered();
+                if (hovTimeSlower && inp.lmbPressed)
+                    timeScaleIdx = std::max(0, timeScaleIdx - 1);
+                CLAY(CLAY_ID("TimeSlowerIcon"), {.layout = {
+                                                     .sizing = {CLAY_SIZING_FIXED(kIconSize), CLAY_SIZING_FIXED(kIconSize)}},
+                                                 .image = {.imageData = (void *)(intptr_t)kIconAngleLeft}}) {}
+            }
+
+            // ── Pause / Play ──────────────────────────────────────────────────
+            Clay_Color pauseBg = timePaused
+                                     ? Clay_Color{160, 60, 30, 230}
+                                     : (hovTimePause ? Clay_Color{60, 60, 100, 230} : Clay_Color{30, 30, 55, 210});
+            CLAY(CLAY_ID("TimePauseBtn"), {.layout = {
+                                               .sizing = {CLAY_SIZING_FIXED(kBtnSize), CLAY_SIZING_FIXED(kBtnSize)},
+                                               .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                           .backgroundColor = pauseBg,
+                                           .cornerRadius = CLAY_CORNER_RADIUS(4)})
+            {
+                hovTimePause = Clay_Hovered();
+                if (hovTimePause && inp.lmbPressed)
+                    timePaused = !timePaused;
+                int pauseIcon = timePaused ? kIconPlay : kIconPause;
+                CLAY(CLAY_ID("TimePauseIcon"), {.layout = {
+                                                    .sizing = {CLAY_SIZING_FIXED(kIconSize), CLAY_SIZING_FIXED(kIconSize)}},
+                                                .image = {.imageData = (void *)(intptr_t)pauseIcon}}) {}
+            }
+
+            // ── Speed up ──────────────────────────────────────────────────────
+            Clay_Color fastBg = hovTimeFaster ? Clay_Color{60, 60, 100, 230} : Clay_Color{30, 30, 55, 210};
+            CLAY(CLAY_ID("TimeFasterBtn"), {.layout = {
+                                                .sizing = {CLAY_SIZING_FIXED(kBtnSize), CLAY_SIZING_FIXED(kBtnSize)},
+                                                .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                            .backgroundColor = fastBg,
+                                            .cornerRadius = CLAY_CORNER_RADIUS(4)})
+            {
+                hovTimeFaster = Clay_Hovered();
+                if (hovTimeFaster && inp.lmbPressed)
+                    timeScaleIdx = std::min(kNumTimeScales - 1, timeScaleIdx + 1);
+                CLAY(CLAY_ID("TimeFasterIcon"), {.layout = {
+                                                     .sizing = {CLAY_SIZING_FIXED(kIconSize), CLAY_SIZING_FIXED(kIconSize)}},
+                                                 .image = {.imageData = (void *)(intptr_t)kIconAngleRight}}) {}
+            }
+        }
+
+        // Hint text
+        CLAY_TEXT(CLAY_STRING(",/. = speed  Space = pause  R = reverse  Tab = hide UI"),
+                  CLAY_TEXT_CONFIG({.textColor = {90, 90, 120, 160}, .fontSize = 10}));
+    }
+
+    // ── Settings icon (bottom-right) ──────────────────────────────────────────
+    const float kSettingsBtnSize = 36.0f;
+    const float kSettingsBtnX = inp.screenW - kSettingsBtnSize - 12.0f;
+    const float kSettingsBtnY = inp.screenH - kSettingsBtnSize - 12.0f;
+    Clay_Color settingsBg = hovSettings ? Clay_Color{60, 60, 100, 230} : Clay_Color{20, 20, 40, 180};
+
+    CLAY(CLAY_ID("SettingsBtn"), {.layout = {
+                                      .sizing = {CLAY_SIZING_FIXED(kSettingsBtnSize), CLAY_SIZING_FIXED(kSettingsBtnSize)},
+                                      .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                  .backgroundColor = settingsBg,
+                                  .cornerRadius = CLAY_CORNER_RADIUS(6),
+                                  .floating = {.offset = {kSettingsBtnX, kSettingsBtnY}, .zIndex = 5, .attachTo = CLAY_ATTACH_TO_ROOT}})
+    {
+        hovSettings = Clay_Hovered();
+        if (hovSettings && inp.lmbPressed)
+            settingsOpen = !settingsOpen;
+        CLAY(CLAY_ID("SettingsIcon"), {.layout = {
+                                           .sizing = {CLAY_SIZING_FIXED(22), CLAY_SIZING_FIXED(22)}},
+                                       .image = {.imageData = (void *)(intptr_t)kIconSettings}}) {}
+    }
+
+    // ── Settings window ───────────────────────────────────────────────────────
+    if (settingsOpen)
+    {
+        const float kWinW = 400.0f;
+        const float kWinH = 440.0f;
+        const float kWinX = (inp.screenW - kWinW) * 0.5f;
+        const float kWinY = (inp.screenH - kWinH) * 0.5f;
+
+        CLAY(CLAY_ID("SettingsWin"), {.layout = {
+                                          .sizing = {CLAY_SIZING_FIXED(kWinW), CLAY_SIZING_FIXED(kWinH)},
+                                          .padding = {0, 0, 0, 0},
+                                          .childGap = 0,
+                                          .layoutDirection = CLAY_TOP_TO_BOTTOM},
+                                      .backgroundColor = {12, 14, 28, 245},
+                                      .cornerRadius = CLAY_CORNER_RADIUS(8),
+                                      .floating = {.offset = {kWinX, kWinY}, .zIndex = 10, .attachTo = CLAY_ATTACH_TO_ROOT}})
+        {
+            // Title bar
+            CLAY(CLAY_ID("SettingsTitleBar"), {.layout = {
+                                                   .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(36)},
+                                                   .padding = {14, 14, 0, 0},
+                                                   .childGap = 0,
+                                                   .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                                   .layoutDirection = CLAY_LEFT_TO_RIGHT},
+                                               .backgroundColor = {18, 22, 45, 255},
+                                               .cornerRadius = {8, 8, 0, 0}})
+            {
+                CLAY_TEXT(CLAY_STRING("Settings"),
+                          CLAY_TEXT_CONFIG({.textColor = {200, 220, 255, 255}, .fontSize = 16}));
+
+                // Spacer
+                CLAY(CLAY_ID("SettingsTitleSpacer"), {.layout = {
+                                                          .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
+
+                // Close button [X]
+                Clay_Color closeBg = hovSettingsClose ? Clay_Color{180, 40, 40, 220} : Clay_Color{60, 30, 30, 180};
+                CLAY(CLAY_ID("SettingsCloseBtn"), {.layout = {
+                                                       .sizing = {CLAY_SIZING_FIXED(24), CLAY_SIZING_FIXED(24)},
+                                                       .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                   .backgroundColor = closeBg,
+                                                   .cornerRadius = CLAY_CORNER_RADIUS(4)})
                 {
-                    hovSpeed[i] = Clay_Hovered();
-                    if (hovSpeed[i] && inp.lmbPressed)
-                        timeScaleIdx = i;
-                    Clay_String lbl{false, (int32_t)strlen(kTimeLabels[i]), kTimeLabels[i]};
-                    CLAY_TEXT(lbl,
-                              CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = 12}));
+                    hovSettingsClose = Clay_Hovered();
+                    if (hovSettingsClose && inp.lmbPressed)
+                        settingsOpen = false;
+                    CLAY_TEXT(CLAY_STRING("X"),
+                              CLAY_TEXT_CONFIG({.textColor = {230, 200, 200, 255}, .fontSize = 12}));
                 }
+            }
+
+            // Scrollable controls list
+            CLAY(CLAY_ID("SettingsScroll"), {.layout = {
+                                                 .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                                                 .padding = {14, 14, 10, 10},
+                                                 .childGap = 4,
+                                                 .layoutDirection = CLAY_TOP_TO_BOTTOM},
+                                             .clip = {.vertical = true, .childOffset = Clay_GetScrollOffset()}})
+            {
+                CLAY_TEXT(CLAY_STRING("Controls"),
+                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = 14}));
+
+                // Thin separator
+                CLAY(CLAY_ID("CtrlSep"), {.layout = {
+                                              .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                              .padding = {0, 0, 4, 4}},
+                                          .backgroundColor = {40, 50, 80, 120}}) {}
+
+                // One row per keybinding
+                static char kbKeyBuf[8][16];
+                for (int ki = 0; ki < (int)keybindings.size() && ki < 8; ++ki)
+                {
+                    KeyBinding &kb = keybindings[ki];
+                    snprintf(kbKeyBuf[ki], sizeof(kbKeyBuf[ki]), "[%s]", keyDisplayName(kb.key));
+
+                    Clay_Color rowBg = kb.listening
+                                           ? Clay_Color{60, 40, 10, 180}
+                                           : Clay_Color{0, 0, 0, 0};
+                    CLAY(CLAY_IDI("KbRow", ki), {.layout = {
+                                                     .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28)},
+                                                     .padding = {4, 4, 4, 4},
+                                                     .childGap = 6,
+                                                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                                     .layoutDirection = CLAY_LEFT_TO_RIGHT},
+                                                 .backgroundColor = rowBg,
+                                                 .cornerRadius = CLAY_CORNER_RADIUS(3)})
+                    {
+                        // Action name (fixed width)
+                        CLAY(CLAY_IDI("KbAction", ki), {.layout = {
+                                                            .sizing = {CLAY_SIZING_FIXED(130), CLAY_SIZING_FIT(0)}}})
+                        {
+                            Clay_String actStr{false, (int32_t)strlen(kb.action), kb.action};
+                            CLAY_TEXT(actStr,
+                                      CLAY_TEXT_CONFIG({.textColor = {180, 200, 240, 220}, .fontSize = 13}));
+                        }
+
+                        // Current key label (fixed width)
+                        CLAY(CLAY_IDI("KbKey", ki), {.layout = {
+                                                         .sizing = {CLAY_SIZING_FIXED(60), CLAY_SIZING_FIT(0)}}})
+                        {
+                            Clay_String keyStr{false, (int32_t)strlen(kbKeyBuf[ki]), kbKeyBuf[ki]};
+                            Clay_Color keyCol = kb.listening
+                                                    ? Clay_Color{255, 180, 60, 255}
+                                                    : Clay_Color{140, 160, 200, 200};
+                            CLAY_TEXT(keyStr,
+                                      CLAY_TEXT_CONFIG({.textColor = keyCol, .fontSize = 13}));
+                        }
+
+                        // Rebind button
+                        Clay_Color rebindBg = kb.listening
+                                                  ? Clay_Color{120, 80, 0, 220}
+                                                  : (hovRebind[ki] ? Clay_Color{50, 60, 100, 220} : Clay_Color{28, 30, 55, 200});
+                        CLAY(CLAY_IDI("KbRebind", ki), {.layout = {
+                                                            .sizing = {CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(20)},
+                                                            .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                        .backgroundColor = rebindBg,
+                                                        .cornerRadius = CLAY_CORNER_RADIUS(3)})
+                        {
+                            hovRebind[ki] = Clay_Hovered();
+                            if (hovRebind[ki] && inp.lmbPressed)
+                            {
+                                // Cancel any other listening binding
+                                for (auto &other : keybindings)
+                                    other.listening = false;
+                                kb.listening = true;
+                            }
+                            CLAY_TEXT(kb.listening ? CLAY_STRING("PRESS KEY") : CLAY_STRING("Rebind"),
+                                      CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = 10}));
+                        }
+                    }
+                }
+
+                // Camera controls section
+                CLAY(CLAY_ID("CamCtrlSep"), {.layout = {
+                                                 .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                                 .padding = {0, 0, 6, 4}},
+                                             .backgroundColor = {40, 50, 80, 120}}) {}
+                CLAY_TEXT(CLAY_STRING("Camera"),
+                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = 14}));
+                CLAY_TEXT(CLAY_STRING("Right-click drag   Look around"),
+                          CLAY_TEXT_CONFIG({.textColor = {110, 130, 160, 180}, .fontSize = 12}));
+                CLAY_TEXT(CLAY_STRING("Scroll wheel        Zoom (FOV)"),
+                          CLAY_TEXT_CONFIG({.textColor = {110, 130, 160, 180}, .fontSize = 12}));
             }
         }
     }
 
-    // Mouse capture rects for all panels
-    ui.addMouseCaptureRect(12, 12, 310, 140);                   // info panel
-    ui.addMouseCaptureRect(inp.screenW - 195.0f, 12, 185, 150); // constellation panel
-    ui.addMouseCaptureRect(12, inp.screenH - 100.0f, 260, 90);  // time panel
+    // ── Mouse capture rects ───────────────────────────────────────────────────
+    ui.addMouseCaptureRect(12, 12, 310, 155);                   // info panel
+    ui.addMouseCaptureRect(inp.screenW - 195.0f, 12, 185, 200); // constellation panel
+    ui.addMouseCaptureRect(12, inp.screenH - 110.0f, 310, 100); // time panel
+    ui.addMouseCaptureRect(kSettingsBtnX, kSettingsBtnY,
+                           kSettingsBtnSize, kSettingsBtnSize); // settings button
+    if (settingsOpen)
+        ui.addMouseCaptureRect((inp.screenW - 400.0f) * 0.5f,
+                               (inp.screenH - 440.0f) * 0.5f,
+                               400.0f, 440.0f); // settings window
 }
 
 // ─── cleanup ──────────────────────────────────────────────────────────────────
@@ -380,10 +680,40 @@ void SatelliteSim::onKey(GLFWwindow *w, int key, int action)
     win = w;
     if (action != GLFW_PRESS)
         return;
-    if (key == GLFW_KEY_T)
+
+    // If any binding is listening, capture this key press and assign it.
+    for (auto &kb : keybindings)
     {
-        timeScaleIdx = (timeScaleIdx + 1) % kNumTimeScales;
+        if (!kb.listening)
+            continue;
+        if (key == GLFW_KEY_ESCAPE)
+        {
+            kb.listening = false; // cancel rebind
+        }
+        else
+        {
+            kb.key = key;
+            kb.listening = false;
+        }
+        return; // consume the key event
     }
+
+    // Dispatch via keybindings array
+    auto pressed = [&](int bindIdx)
+    {
+        return bindIdx < (int)keybindings.size() && key == keybindings[bindIdx].key;
+    };
+
+    if (pressed(0))
+        uiVisible = !uiVisible; // Toggle UI
+    if (pressed(1))
+        timePaused = !timePaused; // Pause/Resume
+    if (pressed(2))
+        timeScaleIdx = std::max(0, timeScaleIdx - 1); // Slow Down
+    if (pressed(3))
+        timeScaleIdx = std::min(kNumTimeScales - 1, timeScaleIdx + 1); // Speed Up
+    if (pressed(4))
+        timeDir = -timeDir; // Reverse Time
 }
 
 // ─── onCursorPos ──────────────────────────────────────────────────────────────
@@ -866,46 +1196,54 @@ void SatelliteSim::initConstellation()
     // ── Satellite type catalogue ───────────────────────────────────────────────
     // crossSectionM2: effective reflective area in m².  Brightness ∝ sqrt(area/10 m²)
     // so doubling the area → ~1.4× brighter (avoids runaway scale for giant structures).
+    //
+    // Each type composes up to two reflective surfaces plus an isotropic diffuse floor:
+    //   primary   — dominant surface (solar panels, antenna face)
+    //   secondary — optional second surface (radiators perpendicular to primay)
+    //               weight=0 disables it; Perpendicular attitude = cross(surfN0, satNadir)
+    //   diffuse   — constant Lambertian floor for structural body scatter (always visible)
     satTypes = {
         {// 0 — Starlink: flat phased-array face toward Earth, brief intense flares
          "Starlink",
-         {0.80f, 0.87f, 1.00f}, // cool blue-white
-         18.0f,                 // very sharp specular (flat mirror-like face)
-         AttitudeMode::NadirPointing,
-         10.0f}, // ~10 m² bus + visor
-        {        // 1 — OneWeb/LEO: sun-tracking panels, gentler opposition flares
-         "OneWeb",
+         {0.80f, 0.87f, 1.00f},                      // cool blue-white
+         100.0f,                                     // ~10 m² bus + visor
+         {AttitudeMode::NadirPointing, 18.0f, 1.0f}, // very sharp specular (flat mirror-like face)
+         {AttitudeMode::Perpendicular, 0.0f, 0.0f},  // no significant secondary surface
+         0.0f},                                      // no diffuse floor
+        {                                            // 1 — LEO broadband (OneWeb/Kuiper/Xingwang/Telesat): sun-tracking panels
+         "LEO Broadband",
          {1.00f, 0.92f, 0.75f}, // warm white
-         6.0f,
-         AttitudeMode::SunTracking,
-         12.0f}, // slightly larger panels
-        {        // 2 — GEO Comsat: large sun-tracking panels, very broad soft flares
+         120.0f,                // ~12 m² typical LEO broadband bus + panels
+         {AttitudeMode::SunTracking, 6.0f, 1.0f},
+         {AttitudeMode::Perpendicular, 0.0f, 0.0f},
+         0.0f},
+        {// 2 — GEO Comsat: large sun-tracking panels + body radiators facing away from Earth
          "GEO Comsat",
-         {0.95f, 0.95f, 1.00f}, // near-white
-         3.0f,                  // very soft specular (broad panels)
-         AttitudeMode::SunTracking,
-         50.0f}, // ~50 m² (large GEO body + wings)
-        {        // 3 — ISS: enormous solar arrays (~2 500 m²)
+         {0.95f, 0.95f, 1.00f},                    // near-white
+         50.0f,                                    // ~50 m² (large GEO body + wings)
+         {AttitudeMode::SunTracking, 3.0f, 1.00f}, // broad lobe solar wings
+         {AttitudeMode::AntiNadir, 2.0f, 0.10f},   // body radiators face deep space
+         0.01f},                                   // slight structural glow
+        {                                          // 3 — ISS: enormous truss-mounted solar arrays AND large radiator panels.
+         // The PVTCS and EATCS radiators (~900 m² NH3 panels on the ITS) face away from
+         // Earth for maximum view factor to cold space. From the ground: ISS at zenith shows
+         // the back of the radiators (dim); ISS near the horizon shows the radiator face.
          "ISS",
          {1.00f, 0.85f, 0.70f}, // warm golden (solar array color)
-         8.0f,
-         AttitudeMode::SunTracking,
-         2500.0f},
-        {// 4 — Space Junk: uncontrolled tumbling debris — chaotic random flashes
-         "Space Junk",
-         {0.65f, 0.62f, 0.60f}, // dull metallic gray
-         6.0f,
-         AttitudeMode::Tumbling,
-         1.0f}, // ~1 m² average debris fragment
-        {       // 5 — Space Datacenter: massive nadir-facing solar arrays on the terminator.
-         // NadirPointing panels at the terminator reflect anti-sunward; a nightside
-         // observer at ~45° phase gets alignment≈0.4, specExp=3 → specular≈0.06.
-         // The huge cross-section (50 000 m²) compensates, yielding a visible ring.
-         "Space Datacenter",
-         {0.85f, 0.92f, 1.00f}, // cool blue-white
-         3.0f,                  // broad lobe — visible over a wide range of phase angles
-         AttitudeMode::SunTracking,
-         50000.0f}, // ~50 000 m² (200 m × 250 m solar array farm)
+         250000.0f,
+         {AttitudeMode::SunTracking, 8.0f, 1.00f}, // truss-mounted solar arrays
+         {AttitudeMode::AntiNadir, 4.0f, 0.35f},   // large radiator panels (ITS) face deep space
+         0.04f},                                   // complex truss/module body
+        {                                          // 4 — SpaceX ODC (FCC filing Jan 2026): Starlink-class bus with large radiator panels
+         // for compute heat rejection. Nadir-pointing phased array + deep-space-facing radiators.
+         // Flat compute/antenna face produces brief nadir flares; radiator face brightens near
+         // the horizon (AntiNadir face tilts toward the observer as satellite descends).
+         "SpaceX ODC",
+         {0.65f, 1.00f, 0.92f},                   // cyan-teal (distinct from Starlink blue-white)
+         5000000.0f,                              // ~15 m² — Starlink-class bus + extra radiator area
+         {AttitudeMode::SunTracking, 8.0f, 1.0f}, // phased-array/compute face toward Earth
+         {AttitudeMode::AntiNadir, 3.0f, 0.25f},  // large radiator panels face deep space
+         0.001f},                                 // slight structural body scatter
     };
 
     // ── Constellation shells ───────────────────────────────────────────────────
@@ -917,17 +1255,112 @@ void SatelliteSim::initConstellation()
     //   .alignTerminator = derive incl+raan from sunDirECI at init
     //   .numRings     = concentric rings (1 = single ring)
     //   .ringSpacingM = altitude step between rings
+    // ── Real mega-constellation data (source: planet4589.org/space/con/conlist.html) ──
+    // Walker field order: name, altM, incl, numPlanes, perPlane, typeIdx, enabled, distribution
+    //   total sats = numPlanes × perPlane
+    // Disk field order (extra trailing args): ..., altJitterM, raan, alignTerminator, numRings, ringSpacingM
+    //   total sats = numPlanes × perPlane, spread evenly across numRings concentric rings
+    //   alignTerminator=true: overrides incl+raan to track sunDirECI (orbital plane = terminator plane)
+    // All totals fit within MAX_SATELLITES=100,000 when all enabled simultaneously (~98,907).
+
     constellations = {
-        {"Starlink G1", 550'000.0f, glm::radians(53.0f), 72 * 10, 22, 0u, true, OrbitDistribution::Walker},
-        {"OneWeb", 1'200'000.0f, glm::radians(87.9f), 18, 36, 1u, true, OrbitDistribution::Walker},
-        {"GEO Belt", 35'786'000.0f, glm::radians(0.0f), 1, 50, 2u, true, OrbitDistribution::Walker},
-        {"ISS", 408'000.0f, glm::radians(51.6f), 1, 1, 3u, true, OrbitDistribution::Walker},
-        // Space junk: randomly distributed at LEO altitudes, full inclination range, tumbling.
-        {"Space Junk LEO", 450'000.0f, glm::pi<float>(), 500, 1, 4u, true, OrbitDistribution::RandomShell, 150'000.0f},
-        // Space Datacenters: single ring on the Earth-Sun terminator, isotropic glow.
-        // Increase numPlanes or add more rings (.numRings) for a denser disk.
-        {"Space Datacenter", 500'000.0f, 0.0f, 3000, 1, 5u, true, OrbitDistribution::Disk,
-         100'000.0f, 0.0f, true}, // altJitterM=0, raan=0(ignored), alignTerminator=true
+        // SpaceX Starlink Gen1 — FCC filing: 4,408 sats; 72 planes × 61 = 4,392
+        {"Starlink Gen1",
+         550'000.0f,          // altM:      550 km
+         glm::radians(53.0f), // incl:      53° — primary mid-inclination shell
+         72,                  // numPlanes: orbital planes
+         61,                  // perPlane:  sats per plane (72×61 = 4,392)
+         0u,                  // typeIdx:   Starlink (NadirPointing)
+         true,                // enabled
+         OrbitDistribution::Walker},
+
+        // SpaceX Starlink Gen2 — FCC filing: 30,456 sats; 120 planes × 254 = 30,480
+        {"Starlink Gen2",
+         525'000.0f,          // altM:      525 km (slightly lower than Gen1)
+         glm::radians(53.2f), // incl:      53.2°
+         120,                 // numPlanes: orbital planes
+         254,                 // perPlane:  sats per plane (120×254 = 30,480)
+         0u,                  // typeIdx:   Starlink (NadirPointing)
+         true,                // enabled
+         OrbitDistribution::Walker},
+
+        // OneWeb (UK/Eutelsat) — planned: 648 sats; 18 planes × 36 = 648
+        {"OneWeb",
+         1'200'000.0f,        // altM:      1,200 km
+         glm::radians(87.9f), // incl:      87.9° — near-polar
+         18,                  // numPlanes: orbital planes
+         36,                  // perPlane:  sats per plane (18×36 = 648)
+         1u,                  // typeIdx:   LEO Broadband (SunTracking)
+         true,                // enabled
+         OrbitDistribution::Walker},
+
+        // Amazon Kuiper — FCC filing: 7,774 sats; 98 planes × 79 = 7,742
+        {"Kuiper",
+         630'000.0f,          // altM:      630 km
+         glm::radians(51.9f), // incl:      51.9°
+         98,                  // numPlanes: orbital planes
+         79,                  // perPlane:  sats per plane (98×79 = 7,742)
+         1u,                  // typeIdx:   LEO Broadband (SunTracking)
+         true,                // enabled
+         OrbitDistribution::Walker},
+
+        // China Xingwang/GW (CASC/CASIC) — planned: ~13,952 sats; 80 planes × 174 = 13,920
+        {"Xingwang",
+         508'000.0f,          // altM:      508 km
+         glm::radians(85.0f), // incl:      85° — near-polar
+         80,                  // numPlanes: orbital planes
+         174,                 // perPlane:  sats per plane (80×174 = 13,920)
+         1u,                  // typeIdx:   LEO Broadband (SunTracking)
+         true,                // enabled
+         OrbitDistribution::Walker},
+
+        // Telesat Lightspeed — planned: 1,671 sats; 27 planes × 62 = 1,674
+        {"Telesat",
+         1'015'000.0f,         // altM:      1,015 km
+         glm::radians(98.98f), // incl:      98.98° — sun-synchronous Walker
+         27,                   // numPlanes: orbital planes
+         62,                   // perPlane:  sats per plane (27×62 = 1,674)
+         1u,                   // typeIdx:   LEO Broadband (SunTracking)
+         true,                 // enabled
+         OrbitDistribution::Walker},
+
+        // GEO commercial belt — representative sample of operational comsats
+        {"GEO Belt",
+         35'786'000.0f,      // altM:      35,786 km (geostationary)
+         glm::radians(0.0f), // incl:      0° — equatorial
+         1,                  // numPlanes: single equatorial ring
+         50,                 // perPlane:  50 representative comsats
+         2u,                 // typeIdx:   GEO Comsat (SunTracking + AntiNadir radiators)
+         true,               // enabled
+         OrbitDistribution::Walker},
+
+        // International Space Station — single object for visual reference
+        {"ISS",
+         408'000.0f,          // altM:      408 km
+         glm::radians(51.6f), // incl:      51.6°
+         1,                   // numPlanes: 1 plane
+         1,                   // perPlane:  1 satellite
+         3u,                  // typeIdx:   ISS (SunTracking + large radiators)
+         true,                // enabled
+         OrbitDistribution::Walker},
+
+        // SpaceX Orbital Data Center — sun-synchronous Disk shell (FCC filing Jan 2026)
+        //   Disk+alignTerminator places the ring in the Earth-Sun terminator plane, visually
+        //   representing where SSO satellites dwell relative to the day/night boundary.
+        //   200 × 100 = 20,000 sats spread across 10 rings from ~575 km to ~1,925 km.
+        {"SpaceX ODC SSO",
+         1'250'000.0f, // altM:      1,250 km — ring centre altitude
+         0.0f,         // incl:      ignored (alignTerminator=true overrides)
+         200,          // numPlanes: × perPlane = total sats (200×100 = 20,000)
+         100,          // perPlane:  × numPlanes = total sats
+         4u,           // typeIdx:   SpaceX ODC (NadirPointing + AntiNadir radiators)
+         true,         // enabled
+         OrbitDistribution::Disk,
+         10000.0f,    // altJitterM:      no per-satellite altitude scatter
+         0.0f,        // raan:            ignored (alignTerminator=true)
+         true,        // alignTerminator: orbital plane = terminator plane (tracks Sun)
+         10,          // numRings:        10 concentric rings
+         150'000.0f}, // ringSpacingM:    150 km between rings (575–1,925 km range)
     };
 
     // ── Populate satOrbits ────────────────────────────────────────────────────
@@ -964,7 +1397,7 @@ void SatelliteSim::initConstellation()
                 float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
                 glm::vec3 axis{sinTheta * cosf(phi), sinTheta * sinf(phi), cosTheta};
 
-                float tumbleRate = 0.08f * (float)rand() / (float)RAND_MAX;
+                float tumbleRate = 0.008f * (float)rand() / (float)RAND_MAX;
                 float tumblePhase = (float)rand() / RAND_MAX * glm::two_pi<float>();
 
                 satOrbits.push_back({raan, incl, u0, c.typeIdx, altM,
@@ -998,10 +1431,13 @@ void SatelliteSim::initConstellation()
                 // Altitude: centre-offset each ring around c.altM.
                 float ringAlt = c.altM + (r - (nr - 1) * 0.5f) * c.ringSpacingM;
 
-                for (int s = 0; s < perRing; ++s)
+                // Model incomplete constellation, vary number of sats per ring to fill totalSats without exceeding it.
+                int satsInThisRing = glm::min(perRing, totalSats - r * perRing);
+
+                for (int s = 0; s < satsInThisRing; ++s)
                 {
                     // Evenly spaced around the ring + optional small jitter.
-                    float u0 = (float)s / perRing * glm::two_pi<float>();
+                    float u0 = (float)s / satsInThisRing * glm::two_pi<float>();
                     float jitter = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * c.altJitterM;
                     satOrbits.push_back({raan_d, incl_d, u0, c.typeIdx, ringAlt + jitter, 0.0f, 0.0f, {0.0f, 0.0f, 1.0f}});
                 }
@@ -1011,6 +1447,24 @@ void SatelliteSim::initConstellation()
         c.orbitCount = (uint32_t)satOrbits.size() - c.orbitStart;
     }
 
+    // ── Safety cap ────────────────────────────────────────────────────────────
+    // satInputBuf and satVisibleBuf are allocated for exactly MAX_SATELLITES
+    // entries.  Exceeding this causes a buffer overflow in recordCompute()'s
+    // memcpy, corrupting heap memory or triggering a GPU fault.  Satellites
+    // beyond the cap are silently dropped.
+    //
+    // Common overflow source: Starlink G1 at 7200 planes × 22 sats = 158,400 —
+    // already 58% over the 100,000 limit.  Raise MAX_SATELLITES and resize the
+    // GPU buffers (createBuffers) if more capacity is needed.  Alternatively,
+    // move orbit computation to a second compute shader so the CPU loop and
+    // the host-visible upload buffer are no longer the bottleneck.
+    if ((uint32_t)satOrbits.size() > MAX_SATELLITES)
+    {
+        fprintf(stderr, "[SatelliteSim] Warning: %zu total satellites exceeds "
+                        "MAX_SATELLITES=%u; truncating.\n",
+                satOrbits.size(), MAX_SATELLITES);
+        satOrbits.resize(MAX_SATELLITES);
+    }
     activeSatCount = (uint32_t)satOrbits.size();
     satInputData.resize(activeSatCount);
 }
@@ -1018,6 +1472,22 @@ void SatelliteSim::initConstellation()
 // ─── updatePositions ──────────────────────────────────────────────────────────
 // Recomputes: observer ECI position + ECI→ENU matrix, sun direction,
 // and per-satellite geometry + panel attitude (nested per-constellation).
+//
+// Performance characteristics:
+//   This function runs on the CPU main thread every frame, O(N) in satellite
+//   count.  Per satellite it executes ~15–20 floating-point operations including
+//   double-precision fmod, cosf/sinf, asinf, length, and conditionally cross
+//   products for tumbling/sun-tracking attitude modes.
+//
+//   Approximate wall time on a modern desktop CPU:
+//     1,000  sats  →  ~0.1 ms
+//    10,000  sats  →  ~1   ms
+//   100,000  sats  →  ~10  ms (hits frame budget at 60 Hz)
+//
+//   For larger constellations the orbit computation should be moved to a
+//   dedicated GPU compute pass.  The CPU would then only upload simTime + the
+//   ECI→ENU matrix (~120 bytes) rather than the full GpuSatInput array
+//   (~6.4 MB at 100k sats).
 void SatelliteSim::updatePositions(double t)
 {
     // ── Observer ECI position (rotates with Earth) ────────────────────────────
@@ -1118,43 +1588,73 @@ void SatelliteSim::updatePositions(double t)
             glm::vec3 satECI_abs = obsECI + relPos;
             glm::vec3 satNadir = glm::normalize(-satECI_abs); // unit vector toward Earth centre
 
-            glm::vec3 panelNormal;
-            if (type.attitude == AttitudeMode::NadirPointing)
+            // ── Compute surface normals ───────────────────────────────────────
+            // surfN0 = primary surface (solar panels, antenna face, tumbling body).
+            // surfN1 = secondary surface (radiators, body panels).
+            //   AntiNadir  — normal = -satNadir (faces deep space, away from Earth)
+            //   Perpendicular — normal = cross(surfN0, satNadir) (along orbital track)
+            // The irradiance term in sat_flare.comp gates each surface by solar flux received.
+            auto computeNormal = [&](AttitudeMode mode,
+                                     const glm::vec3 &primary) -> glm::vec3
             {
-                panelNormal = satNadir;
-            }
-            else if (type.attitude == AttitudeMode::Tumbling)
-            {
-                // Spin around a body-fixed random axis; angle advances with simTime.
-                // fmod before float cast: simTime ≈ 8e8 s gives only ~96 s float precision,
-                // causing (float)t * rate to jump by ~96 rad between frames → staggering.
-                float angle = orb.tumblePhase +
-                              (float)fmod((double)orb.tumbleRate * t, glm::two_pi<double>());
-                glm::vec3 ax = orb.tumbleAxis;
-                glm::vec3 ref = (fabsf(ax.z) < 0.9f) ? glm::vec3(0, 0, 1) : glm::vec3(1, 0, 0);
-                glm::vec3 axA = glm::normalize(glm::cross(ax, ref));
-                glm::vec3 axB = glm::cross(ax, axA);                 // already unit length
-                panelNormal = cosf(angle) * axA + sinf(angle) * axB; // already unit length
-            }
-            else // SunTracking
-            {
-                // Solar panels rotate around the nadir body axis to track the sun's azimuth.
-                // Panel normal = sun direction projected onto the satellite's local horizontal
-                // plane (removes nadir component) to avoid the retroreflector degeneracy.
-                glm::vec3 sunHoriz = sunDirECI - glm::dot(sunDirECI, satNadir) * satNadir;
-                float horizLen = glm::length(sunHoriz);
-                panelNormal = (horizLen > 1e-5f)
-                                  ? sunHoriz / horizLen
-                                  : satNadir;
-            }
+                switch (mode)
+                {
+                case AttitudeMode::NadirPointing:
+                    return satNadir;
+                case AttitudeMode::Tumbling:
+                {
+                    // Spin around a body-fixed random axis; angle advances with simTime.
+                    // fmod before float cast: simTime ≈ 8e8 s gives only ~96 s float precision,
+                    // causing (float)t * rate to jump by ~96 rad between frames → staggering.
+                    float angle = orb.tumblePhase +
+                                  (float)fmod((double)orb.tumbleRate * t, glm::two_pi<double>());
+                    glm::vec3 ax = orb.tumbleAxis;
+                    glm::vec3 ref = (fabsf(ax.z) < 0.9f) ? glm::vec3(0, 0, 1) : glm::vec3(1, 0, 0);
+                    glm::vec3 axA = glm::normalize(glm::cross(ax, ref));
+                    glm::vec3 axB = glm::cross(ax, axA); // already unit length
+                    return cosf(angle) * axA + sinf(angle) * axB;
+                }
+                case AttitudeMode::Perpendicular:
+                {
+                    // 90° to primary panel normal in the nadir plane, along the orbital track.
+                    glm::vec3 perp = glm::cross(primary, satNadir);
+                    float len = glm::length(perp);
+                    return (len > 1e-5f) ? perp / len : satNadir;
+                }
+                case AttitudeMode::AntiNadir:
+                {
+                    // Thermal radiators facing deep space (away from Earth center).
+                    // From the ground: edge-on to observers directly beneath the satellite
+                    // (zenith pass) — they see the back of the panel; horizon observers
+                    // see the face tilted toward them, making flares more likely at low elevation.
+                    return -satNadir;
+                }
+                default: // SunTracking
+                {
+                    // Solar panels rotate around the nadir body axis to track the sun's azimuth.
+                    // Panel normal = sun direction projected onto the satellite's local horizontal
+                    // plane (removes nadir component) to avoid the retroreflector degeneracy.
+                    glm::vec3 sunHoriz = sunDirECI - glm::dot(sunDirECI, satNadir) * satNadir;
+                    float horizLen = glm::length(sunHoriz);
+                    return (horizLen > 1e-5f) ? sunHoriz / horizLen : satNadir;
+                }
+                }
+            };
+
+            glm::vec3 surfN0 = computeNormal(type.primary.attitude, glm::vec3(0.0f));
+            glm::vec3 surfN1 = computeNormal(type.secondary.attitude, surfN0);
 
             satInputData[i].eciRelPos = relPos;
             satInputData[i].range = range;
-            satInputData[i].panelNormal = panelNormal;
+            satInputData[i].surfN0 = surfN0;
             satInputData[i].elevation = el;
+            satInputData[i].surfN1 = surfN1;
+            satInputData[i].specExp0 = type.primary.specExp;
             satInputData[i].baseColor = type.baseColor;
-            satInputData[i].specExp = type.specExp;
+            satInputData[i].specExp1 = type.secondary.specExp;
             satInputData[i].crossSection = sqrtf(type.crossSectionM2 / 10.0f);
+            satInputData[i].w1 = type.secondary.weight;
+            satInputData[i].diffuse = type.diffuse;
 
             if (el > -0.01f)
                 ++visibleCount;

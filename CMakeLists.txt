@@ -97,3 +97,13 @@ add_custom_command(TARGET ShaderFun POST_BUILD
         $<TARGET_FILE_DIR:ShaderFun>/shaders
     COMMENT "Copying shaders to output directory"
 )
+
+# Copy assets (icons, textures, etc.) next to the executable
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+    add_custom_command(TARGET ShaderFun POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+            "$<TARGET_FILE_DIR:ShaderFun>/assets"
+        COMMENT "Copying assets to output directory"
+    )
+endif()

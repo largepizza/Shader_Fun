@@ -22,6 +22,13 @@ enum class AttitudeMode
     NadirPointing, // flat face toward Earth (Starlink bus/antenna) — brief intense flares
     SunTracking,   // panel normal tracks sun for power — opposition flares
     Tumbling,      // uncontrolled random tumble — chaotic flashes (debris)
+    Perpendicular, // 90° to primary surface in the nadir plane — along orbital track
+                   // (secondary only: normal = cross(surfN0, satNadir))
+    AntiNadir,     // facing away from Earth center — deep-space-pointing radiator panels
+                   // (secondary only: normal = -satNadir)
+                   // Brightest to observers at the satellite's horizon; nearly invisible
+                   // to observers directly beneath (at satellite's zenith), because the
+                   // radiator face points away from them toward cold space.
 };
 
 // ── Orbit distribution type ────────────────────────────────────────────────────
@@ -33,14 +40,27 @@ enum class OrbitDistribution
                  // Set alignTerminator=true to auto-derive the plane from sunDirECI
 };
 
+// ── One reflective surface of a satellite ─────────────────────────────────────
+// A SatelliteType is composed of a primary surface plus an optional secondary
+// surface (e.g. radiator panels perpendicular to solar panels) and an optional
+// isotropic diffuse floor (structural body scatter).
+struct SurfaceSpec
+{
+    AttitudeMode attitude;  // how the surface normal is oriented each frame
+    float        specExp;   // specular exponent (0 = Lambertian diffuse)
+    float        weight;    // contribution weight relative to primary (0 = disabled)
+};
+
 // ── Per-type satellite parameters (CPU-side, drives GpuSatInput fields) ───────
 struct SatelliteType
 {
-    const char *name;
-    glm::vec3 baseColor;      // visual tint (also base reflectance)
-    float specExp;            // specular exponent: higher = sharper peak flares
-    AttitudeMode attitude;
-    float crossSectionM2;     // effective reflective cross-section (m²); drives brightness
+    const char*  name;
+    glm::vec3    baseColor;       // visual tint
+    float        crossSectionM2;  // total reflective area (m²); brightness ∝ sqrt(area/10)
+    SurfaceSpec  primary;         // always active (solar panels, antenna face, etc.)
+    SurfaceSpec  secondary;       // optional second surface — set weight=0 to disable
+    float        diffuse;         // isotropic Lambertian floor: always visible fraction [0,1]
+                                  // models structural body scatter; applied after litFactor
 };
 
 // ── Constellation descriptor ───────────────────────────────────────────────────
@@ -67,21 +87,33 @@ struct ConstellationConfig
 };
 
 // ── GPU data structures ───────────────────────────────────────────────────────
-// std430 packing: vec3 alignment=16 size=12, so vec3+float = 16 bytes.
-// Three vec3+float pairs = 48 bytes total.
+// std430 packing: vec3 alignment=16 size=12, so vec3+float fills one 16-byte block.
+// Five vec3+float blocks (80 bytes) + one float4 tail = 80 bytes total.
+//
+// Byte map:
+//   [  0] eciRelPos (vec3) + range (float)         — position data
+//   [ 16] surfN0    (vec3) + elevation (float)      — primary surface normal
+//   [ 32] surfN1    (vec3) + specExp0 (float)       — secondary surface normal
+//   [ 48] baseColor (vec3) + specExp1 (float)       — colour + secondary specular
+//   [ 64] crossSection + w1 + diffuse + _pad (float4) — photometric scalars
+//   Total: 80 bytes
 
 struct GpuSatInput
 {
-    glm::vec3 eciRelPos;   // observer-relative ECI position (meters)
-    float range;           // distance (meters)
-    glm::vec3 panelNormal; // panel normal in ECI (unit vector), attitude-dependent
-    float elevation;       // elevation above local horizon (radians), pre-computed on CPU
-    glm::vec3 baseColor;   // satellite tint from SatelliteType
-    float specExp;         // specular exponent from SatelliteType
-    float crossSection;    // sqrt(crossSectionM2 / 10.0): area brightness scale (~1 = 10 m²)
-    float _pad[3];         // pad to 64 bytes (std430 alignment)
+    glm::vec3 eciRelPos;    // observer-relative ECI position (meters)
+    float     range;        // distance (meters)
+    glm::vec3 surfN0;       // primary surface normal in ECI (attitude-dependent unit vector)
+    float     elevation;    // elevation above local horizon (radians), pre-computed on CPU
+    glm::vec3 surfN1;       // secondary surface normal in ECI (radiators, body, etc.)
+    float     specExp0;     // primary surface specular exponent (0 = Lambertian)
+    glm::vec3 baseColor;    // satellite tint from SatelliteType
+    float     specExp1;     // secondary surface specular exponent (0 = Lambertian)
+    float     crossSection; // sqrt(crossSectionM2 / 10.0): area brightness scale (~1 = 10 m²)
+    float     w1;           // secondary surface weight relative to primary (0 = disabled)
+    float     diffuse;      // isotropic Lambertian floor — structural body scatter [0,1]
+    float     _pad;         // pad to 80 bytes (std430 alignment)
 };
-static_assert(sizeof(GpuSatInput) == 64, "GpuSatInput layout mismatch");
+static_assert(sizeof(GpuSatInput) == 80, "GpuSatInput layout mismatch");
 
 struct GpuSatVisible
 {
@@ -256,10 +288,26 @@ private:
 
     // ── Simulation state ──────────────────────────────────────────────────────
     SkyCamera camera;
-    double simTime = 0.0; // accumulated simulation seconds
-    int timeScaleIdx = 1; // index into kTimeScales[]
+    double simTime    = 0.0;
+    int    timeScaleIdx = 1;
+    bool   timePaused   = false;
+    float  timeDir      = 1.0f;  // +1 = forward, -1 = reverse
     uint32_t activeSatCount = 0;
-    uint32_t visibleCount = 0; // above-horizon satellites this frame
+    uint32_t visibleCount   = 0;
+
+    // ── UI visibility & settings ──────────────────────────────────────────────
+    bool uiVisible    = true;
+    bool settingsOpen = false;
+    bool iconsLoaded  = false;
+    VulkanContext* ctx_ = nullptr; // set in init(), used for lazy icon loading
+
+    // ── Key bindings (editable in the settings window) ────────────────────────
+    struct KeyBinding {
+        const char* action;
+        int         key;
+        bool        listening = false;
+    };
+    std::vector<KeyBinding> keybindings;
 
     // ── ECI → ENU rotation (updated each frame in updatePositions) ────────────
     // Encodes the surface-fixed observer's local frame in ECI coordinates.
@@ -287,8 +335,13 @@ private:
     float dmx = 0, dmy = 0; // accumulated delta for this frame
 
     // ── UI hover state (one-frame lag) ────────────────────────────────────────
-    bool hovSpeed[5] = {};
-    bool hovConst[8] = {}; // constellation toggle buttons
+    bool hovConst[10]   = {};
+    bool hovTimeSlower  = false;
+    bool hovTimePause   = false;
+    bool hovTimeFaster  = false;
+    bool hovSettings    = false;
+    bool hovSettingsClose = false;
+    bool hovRebind[8]   = {}; // per keybinding row
 
     // ── Private helpers ───────────────────────────────────────────────────────
     void createBuffers(VulkanContext &ctx);

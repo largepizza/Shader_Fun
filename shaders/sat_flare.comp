@@ -1,18 +1,57 @@
+// ── sat_flare.comp ────────────────────────────────────────────────────────────
+// Compute shader: converts CPU-prepared satellite positions into screen-ready
+// visibility records consumed by sat_point.vert.
+//
+// Dispatch: one invocation per satellite (local_size_x = 64).
+// Invocations beyond pc.satCount return immediately (boundary guard line 53).
+//
+// Per-invocation work (roughly in pipeline order):
+//   1. Horizon cull       — skip satellite if elevation < HORIZON_EL (early out)
+//   2. ECI→ENU projection — 3 dot products to get skyDir
+//   3. Distance falloff   — inverse-square law normalised to REF_RANGE=500 km
+//   4. Earth shadow       — penumbra via smoothstep across ±1% R_Earth (~64 km)
+//   5. Specular flare     — spec0 (primary) + spec1*w1 (secondary) + diffuse floor
+//   6. Daytime suppression— attenuate by sun elevation (satellites invisible
+//                           in daylight unless flare > ~0.25 effectiveIntensity)
+//   7. Visibility cull    — zero output if effectFlare < VIS_THRESH (saves vertex work)
+//   8. Point size         — baseSize + effectFlare * 54 px; large for flaring sats
+//
+// Output per satellite: GpuSatVisible (32 bytes) — skyDir, flareIntensity,
+// baseColor, angularSize.  Written to binding=1 SSBO; read by sat_point.vert.
+//
+// Performance note:
+//   GPU-side work is cheap even at 100k satellites (~100k invocations, minimal
+//   divergence for the majority that hit the horizon-cull early out at night).
+//   The bottleneck is on the CPU: updatePositions() prepares the GpuSatInput
+//   array and memcpy's it (~6.4 MB at 100k sats) every frame before this
+//   shader runs.  See the comment above updatePositions() for scaling details.
+// ─────────────────────────────────────────────────────────────────────────────
+
 #version 450
 
 layout(local_size_x = 64) in;
 
 // ── Input: CPU writes each frame ─────────────────────────────────────────────
-// Matches GpuSatInput (64 bytes, std430).
+// Matches GpuSatInput (80 bytes, std430).
+// Byte layout (vec3 alignment=16, each vec3+float occupies one 16-byte block):
+//   [ 0] eciRelPos (vec3) + range (float)
+//   [16] surfN0    (vec3) + elevation (float)   — primary surface normal
+//   [32] surfN1    (vec3) + specExp0 (float)     — secondary surface normal
+//   [48] baseColor (vec3) + specExp1 (float)
+//   [64] crossSection + w1 + diffuse + pad0 (float×4)
 struct SatInput {
-    vec3  eciRelPos;   // observer-relative ECI position (meters)
-    float range;       // distance to satellite (meters)
-    vec3  panelNormal; // panel normal in ECI (attitude-dependent, unit vector)
-    float elevation;   // elevation above local horizon (radians), pre-computed
-    vec3  baseColor;   // satellite tint from SatelliteType
-    float specExp;     // specular exponent from SatelliteType
-    float crossSection;// sqrt(area_m2 / 10): brightness scale (~1 = Starlink-size)
-    float pad0; float pad1; float pad2;
+    vec3  eciRelPos;    // observer-relative ECI position (meters)
+    float range;        // distance to satellite (meters)
+    vec3  surfN0;       // primary surface normal in ECI (solar panels / antenna)
+    float elevation;    // elevation above local horizon (radians), pre-computed
+    vec3  surfN1;       // secondary surface normal in ECI (radiators, body panels)
+    float specExp0;     // primary specular exponent (0 = Lambertian)
+    vec3  baseColor;    // satellite tint from SatelliteType
+    float specExp1;     // secondary specular exponent (0 = Lambertian)
+    float crossSection; // sqrt(area_m² / 10): brightness scale (~1 = Starlink-size)
+    float w1;           // secondary surface weight relative to primary (0 = disabled)
+    float diffuse;      // isotropic Lambertian floor — structural body scatter [0,1]
+    float pad0;
 };
 layout(set = 0, binding = 0) readonly buffer SatInputBuf {
     SatInput satellites[];
@@ -90,24 +129,54 @@ void main() {
         ? smoothstep(-R_EARTH * 0.01, R_EARTH * 0.01, perpLen - R_EARTH)
         : 1.0;
 
-    // ── Specular flare model ──────────────────────────────────────────────────
-    vec3  panelN    = normalize(sat.panelNormal);
-    vec3  satToObs  = normalize(-sat.eciRelPos);      // direction sat → observer (ECI)
-    vec3  reflected = reflect(-pc.sunDirECI, panelN); // reflected sun ray
-    float alignment = dot(reflected, satToObs);        // 1.0 = perfect alignment
+    // ── Multi-surface specular model ──────────────────────────────────────────
+    // Three contributions are summed:
+    //   spec0  — primary surface (solar panels / antenna face)
+    //   spec1  — secondary surface (radiators, body panels), scaled by w1
+    //   diffFloor — isotropic Lambertian floor for structural body scatter
+    //
+    // specExp == 0 uses Lambertian phase (cos of sun–observer angle) instead of
+    // the specular pow() so that diffuse surfaces remain visible at all phase angles.
+    //
+    // Secondary surface (surfN1) is typically a flat radiator panel; both faces can
+    // illuminate the observer depending on the phase angle.  We pick whichever face
+    // is toward the sun so both sides of the panel contribute through the orbit.
+    vec3  satToObs  = normalize(-sat.eciRelPos);
 
-    // specExp == 0 means diffuse/isotropic emitter (Space Datacenter etc.).
-    // Use Lambertian phase: brightness ∝ cos(phase angle), where phase angle is
-    // the angle at the satellite between the sun and observer directions.
-    // dot(sunDirECI, satToObs) = cos(phase): 1.0 = observer on sun side (fully lit face
-    // toward observer), 0 = 90° phase, negative = observer sees the backlit side → 0.
-    // This ensures panels facing away from the observer produce no reflected light.
-    float specular  = (sat.specExp < 0.01)
-                        ? max(0.0, dot(pc.sunDirECI, satToObs))
-                        : pow(max(0.0, alignment), sat.specExp);
+    // ── Irradiance-weighted specular ──────────────────────────────────────────
+    // Physical constraint: a surface can only reflect as much light as it receives.
+    // irr = max(0, dot(sunDir, faceNormal)) is the cosine factor (Lambert's law for
+    // incoming flux).  Without this term, edge-on or backlit surfaces produce specular
+    // highlights that have no physical basis.
+    //
+    // For Perpendicular radiators: surfN1 = cross(surfN0, satNadir) where surfN0 tracks
+    // the sun, so dot(sunDirECI, surfN1) ≈ 0 always — the radiator is always edge-on to
+    // the sun.  irr1 ≈ 0 automatically suppresses this surface; the diffuse floor
+    // handles residual large-structure visibility instead.
+    //
+    // For two-sided panels: a flat panel illuminated from one face or the other.
+    // irr = abs(dot(sun, normal)) picks the lit face's irradiance correctly.
+
+    // Primary surface
+    float irr0   = abs(dot(pc.sunDirECI, sat.surfN0));
+    vec3  n0     = (dot(pc.sunDirECI, sat.surfN0) >= 0.0) ? sat.surfN0 : -sat.surfN0;
+    vec3  refl0  = reflect(-pc.sunDirECI, n0);
+    float spec0  = irr0 * ((sat.specExp0 < 0.01)
+                    ? max(0.0, dot(pc.sunDirECI, satToObs))
+                    : pow(max(0.0, dot(refl0, satToObs)), sat.specExp0));
+
+    // Secondary surface — irr1 = 0 for edge-on surfaces (e.g. Perpendicular radiators)
+    float irr1   = abs(dot(pc.sunDirECI, sat.surfN1));
+    vec3  n1     = (dot(pc.sunDirECI, sat.surfN1) >= 0.0) ? sat.surfN1 : -sat.surfN1;
+    vec3  refl1  = reflect(-pc.sunDirECI, n1);
+    float spec1  = irr1 * ((sat.specExp1 < 0.01)
+                    ? max(0.0, dot(pc.sunDirECI, satToObs))
+                    : pow(max(0.0, dot(refl1, satToObs)), sat.specExp1));
+
     // crossSection = sqrt(area_m² / 10): larger structures reflect proportionally more flux.
     // A 10 m² satellite has crossSection≈1; a 50 000 m² space datacenter ≈70×.
-    float flare     = specular * litFactor * distFactor * sat.crossSection;
+    float specular = spec0 + spec1 * sat.w1 + sat.diffuse;
+    float flare    = specular * litFactor * distFactor * sat.crossSection;
 
     // ── Daytime sky suppression ───────────────────────────────────────────────
     // In full daylight the sky is millions of times brighter than a satellite.

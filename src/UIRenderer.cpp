@@ -8,6 +8,9 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 // ── Standard includes ─────────────────────────────────────────────────────────
 #include "UIRenderer.h"
 #include "VulkanContext.h"
@@ -90,24 +93,31 @@ void UIRenderer::init(VulkanContext& ctx) {
         idxBuf, idxMem);
     vkMapMemory(ctx.device, idxMem, 0, idxSize, 0, &idxMapped);
 
-    // ── Descriptor set layout: binding 0 = font atlas sampler ────────────────
+    // ── Icon placeholder (1×1 white RGBA) — must exist before descriptor writes ──
+    createIconPlaceholder(ctx);
+
+    // ── Descriptor set layout: binding 0 = font atlas, binding 1 = icon atlas ──
     {
-        VkDescriptorSetLayoutBinding b{};
-        b.binding         = 0;
-        b.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        b.descriptorCount = 1;
-        b.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutBinding bindings[2] = {};
+        bindings[0].binding         = 0;
+        bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[0].descriptorCount = 1;
+        bindings[0].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[1].binding         = 1;
+        bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[1].descriptorCount = 1;
+        bindings[1].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 1;
-        ci.pBindings    = &b;
+        ci.bindingCount = 2;
+        ci.pBindings    = bindings;
         if (vkCreateDescriptorSetLayout(ctx.device, &ci, nullptr, &descLayout) != VK_SUCCESS)
             throw std::runtime_error("UIRenderer: vkCreateDescriptorSetLayout failed.");
     }
 
     // ── Descriptor pool + set ─────────────────────────────────────────────────
     {
-        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 };
         VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         pi.poolSizeCount = 1;
         pi.pPoolSizes    = &ps;
@@ -122,15 +132,24 @@ void UIRenderer::init(VulkanContext& ctx) {
         if (vkAllocateDescriptorSets(ctx.device, &ai, &descSet) != VK_SUCCESS)
             throw std::runtime_error("UIRenderer: vkAllocateDescriptorSets failed.");
 
-        VkDescriptorImageInfo imgInfo{ font.sampler, font.view,
-                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet          = descSet;
-        w.dstBinding      = 0;
-        w.descriptorCount = 1;
-        w.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w.pImageInfo      = &imgInfo;
-        vkUpdateDescriptorSets(ctx.device, 1, &w, 0, nullptr);
+        VkDescriptorImageInfo fontInfo{ font.sampler, font.view,
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo iconInfo{ iconSampler, iconView,
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet writes[2] = {};
+        writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet          = descSet;
+        writes[0].dstBinding      = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[0].pImageInfo      = &fontInfo;
+        writes[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet          = descSet;
+        writes[1].dstBinding      = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo      = &iconInfo;
+        vkUpdateDescriptorSets(ctx.device, 2, writes, 0, nullptr);
     }
 
     // ── Pipeline ─────────────────────────────────────────────────────────────
@@ -486,8 +505,173 @@ void UIRenderer::cleanup(VkDevice device) {
         delete reinterpret_cast<stbtt_fontinfo*>(font.fontInfo);
         font.fontInfo = nullptr;
     }
+
+    if (iconSampler != VK_NULL_HANDLE) { vkDestroySampler(device, iconSampler, nullptr); iconSampler = VK_NULL_HANDLE; }
+    if (iconView    != VK_NULL_HANDLE) { vkDestroyImageView(device, iconView, nullptr);   iconView    = VK_NULL_HANDLE; }
+    if (iconImage   != VK_NULL_HANDLE) { vkDestroyImage(device, iconImage, nullptr);      iconImage   = VK_NULL_HANDLE; }
+    if (iconMemory  != VK_NULL_HANDLE) { vkFreeMemory(device, iconMemory, nullptr);       iconMemory  = VK_NULL_HANDLE; }
+
     delete[] reinterpret_cast<uint8_t*>(clayMemory);
     clayMemory = nullptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// createIconPlaceholder — 1×1 white RGBA pixel so binding 1 is always valid
+// ─────────────────────────────────────────────────────────────────────────────
+void UIRenderer::createIconPlaceholder(VulkanContext& ctx) {
+    std::vector<uint8_t> pixel = { 255, 255, 255, 255 };
+    uploadIconAtlas(ctx, pixel, 1, 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// uploadIconAtlas — create/replace the icon GPU image
+// ─────────────────────────────────────────────────────────────────────────────
+void UIRenderer::uploadIconAtlas(VulkanContext& ctx, const std::vector<uint8_t>& rgba, int w, int h) {
+    // Destroy existing icon image (safe if VK_NULL_HANDLE)
+    if (iconSampler != VK_NULL_HANDLE) { vkDestroySampler(ctx.device, iconSampler, nullptr); iconSampler = VK_NULL_HANDLE; }
+    if (iconView    != VK_NULL_HANDLE) { vkDestroyImageView(ctx.device, iconView, nullptr);   iconView    = VK_NULL_HANDLE; }
+    if (iconImage   != VK_NULL_HANDLE) { vkDestroyImage(ctx.device, iconImage, nullptr);      iconImage   = VK_NULL_HANDLE; }
+    if (iconMemory  != VK_NULL_HANDLE) { vkFreeMemory(ctx.device, iconMemory, nullptr);       iconMemory  = VK_NULL_HANDLE; }
+
+    VkDeviceSize bytes = (VkDeviceSize)(w * h * 4);
+
+    // Staging buffer
+    VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+    ctx.createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingBuf, stagingMem);
+    void* mapped;
+    vkMapMemory(ctx.device, stagingMem, 0, bytes, 0, &mapped);
+    memcpy(mapped, rgba.data(), (size_t)bytes);
+    vkUnmapMemory(ctx.device, stagingMem);
+
+    // Image
+    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.imageType   = VK_IMAGE_TYPE_2D;
+    ci.format      = VK_FORMAT_R8G8B8A8_UNORM;
+    ci.extent      = { (uint32_t)w, (uint32_t)h, 1 };
+    ci.mipLevels   = 1;
+    ci.arrayLayers = 1;
+    ci.samples     = VK_SAMPLE_COUNT_1_BIT;
+    ci.tiling      = VK_IMAGE_TILING_OPTIMAL;
+    ci.usage       = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(ctx.device, &ci, nullptr, &iconImage) != VK_SUCCESS)
+        throw std::runtime_error("UIRenderer: vkCreateImage (icon atlas) failed.");
+
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(ctx.device, iconImage, &req);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize  = req.size;
+    ai.memoryTypeIndex = ctx.findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(ctx.device, &ai, nullptr, &iconMemory) != VK_SUCCESS)
+        throw std::runtime_error("UIRenderer: vkAllocateMemory (icon atlas) failed.");
+    vkBindImageMemory(ctx.device, iconImage, iconMemory, 0);
+
+    // Upload via one-time command buffer
+    {
+        auto cmd = ctx.beginOneTimeCommands();
+        ctx.imageBarrier(cmd, iconImage,
+            0, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkBufferImageCopy region{};
+        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        region.imageExtent      = { (uint32_t)w, (uint32_t)h, 1 };
+        vkCmdCopyBufferToImage(cmd, stagingBuf, iconImage,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        ctx.imageBarrier(cmd, iconImage,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        ctx.endOneTimeCommands(cmd);
+    }
+    vkDestroyBuffer(ctx.device, stagingBuf, nullptr);
+    vkFreeMemory(ctx.device, stagingMem, nullptr);
+
+    // Image view
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image    = iconImage;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format   = VK_FORMAT_R8G8B8A8_UNORM;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    if (vkCreateImageView(ctx.device, &vci, nullptr, &iconView) != VK_SUCCESS)
+        throw std::runtime_error("UIRenderer: vkCreateImageView (icon atlas) failed.");
+
+    // Sampler
+    VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    sci.magFilter    = VK_FILTER_LINEAR;
+    sci.minFilter    = VK_FILTER_LINEAR;
+    sci.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (vkCreateSampler(ctx.device, &sci, nullptr, &iconSampler) != VK_SUCCESS)
+        throw std::runtime_error("UIRenderer: vkCreateSampler (icon atlas) failed.");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// rebindIconDescriptor — update binding 1 after loadIcons replaces the atlas
+// ─────────────────────────────────────────────────────────────────────────────
+void UIRenderer::rebindIconDescriptor(VkDevice device) {
+    VkDescriptorImageInfo imgInfo{ iconSampler, iconView,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet          = descSet;
+    w.dstBinding      = 1;
+    w.descriptorCount = 1;
+    w.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo      = &imgInfo;
+    vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// loadIcons — load PNG files, pack into horizontal atlas, upload to GPU
+// ─────────────────────────────────────────────────────────────────────────────
+int UIRenderer::loadIcons(VulkanContext& ctx, const char* const* paths, int count) {
+    if (count <= 0) return 0;
+
+    struct RawIcon { uint8_t* data; int w, h; };
+    std::vector<RawIcon> icons(count);
+    int totalW = 0, maxH = 0;
+
+    for (int i = 0; i < count; ++i) {
+        int nc = 0;
+        icons[i].data = stbi_load(paths[i], &icons[i].w, &icons[i].h, &nc, 4);
+        if (!icons[i].data) {
+            // Fallback: 1×1 magenta so a missing icon is obvious
+            icons[i].data = (uint8_t*)malloc(4);
+            icons[i].data[0] = 255; icons[i].data[1] = 0;
+            icons[i].data[2] = 255; icons[i].data[3] = 255;
+            icons[i].w = icons[i].h = 1;
+            fprintf(stderr, "[UIRenderer] Warning: could not load icon '%s'\n", paths[i]);
+        }
+        totalW += icons[i].w;
+        if (icons[i].h > maxH) maxH = icons[i].h;
+    }
+
+    // Pack horizontally into an RGBA atlas
+    std::vector<uint8_t> atlas((size_t)(totalW * maxH * 4), 0);
+    iconEntries.resize(count);
+    int x = 0;
+    for (int i = 0; i < count; ++i) {
+        for (int row = 0; row < icons[i].h; ++row) {
+            memcpy(&atlas[((size_t)(row * totalW + x)) * 4],
+                   &icons[i].data[(size_t)(row * icons[i].w) * 4],
+                   (size_t)icons[i].w * 4);
+        }
+        iconEntries[i].u0 = (float)x           / (float)totalW;
+        iconEntries[i].u1 = (float)(x + icons[i].w) / (float)totalW;
+        iconEntries[i].v0 = 0.0f;
+        iconEntries[i].v1 = (float)icons[i].h  / (float)maxH;
+        x += icons[i].w;
+        stbi_image_free(icons[i].data);
+    }
+
+    uploadIconAtlas(ctx, atlas, totalW, maxH);
+    rebindIconDescriptor(ctx.device);
+    return count;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -513,6 +697,7 @@ void UIRenderer::beginFrame(float width, float height,
     frameInput.rmbDown     = rmbDown;
     frameInput.rmbPressed  = rmbDown && !prevRmb;
     frameInput.rmbReleased = !rmbDown && prevRmb;
+    frameInput.scrollY     = scrollDeltaY;
     frameInput.dt          = dt;
 
     prevMx  = mouseX;
@@ -728,8 +913,20 @@ void UIRenderer::record(VkCommandBuffer cmd, VulkanContext& ctx) {
             break;
         }
 
+        case CLAY_RENDER_COMMAND_TYPE_IMAGE: {
+            // imageData encodes the icon index as a pointer-sized integer.
+            int iconIdx = (int)(intptr_t)rc->renderData.image.imageData;
+            if (iconIdx >= 0 && iconIdx < (int)iconEntries.size()) {
+                const IconEntry& ie = iconEntries[iconIdx];
+                pushQuad(bb.x, bb.y, bb.width, bb.height,
+                         ie.u0, ie.v0, ie.u1, ie.v1,
+                         {1.0f, 1.0f, 1.0f, 1.0f}, 2.0f);
+            }
+            break;
+        }
+
         default:
-            // NONE, IMAGE, CUSTOM — not handled by this renderer
+            // NONE, CUSTOM — not handled by this renderer
             break;
         }
     }
