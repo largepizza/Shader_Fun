@@ -391,6 +391,11 @@ void UIRenderer::createPipeline(VulkanContext& ctx) {
             throw std::runtime_error("UIRenderer: vkCreatePipelineLayout failed.");
     }
 
+    // Depth test off — UI always draws on top.
+    VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthTestEnable  = VK_FALSE;
+    ds.depthWriteEnable = VK_FALSE;
+
     VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     ci.stageCount          = 2;
     ci.pStages             = stages;
@@ -399,6 +404,7 @@ void UIRenderer::createPipeline(VulkanContext& ctx) {
     ci.pViewportState      = &vps;
     ci.pRasterizationState = &rast;
     ci.pMultisampleState   = &ms;
+    ci.pDepthStencilState  = &ds;
     ci.pColorBlendState    = &cb;
     ci.pDynamicState       = &dyn;
     ci.layout              = pipeLayout;

@@ -1,0 +1,140 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+// ── Input: CPU writes each frame ─────────────────────────────────────────────
+// Matches GpuSatInput (64 bytes, std430).
+struct SatInput {
+    vec3  eciRelPos;   // observer-relative ECI position (meters)
+    float range;       // distance to satellite (meters)
+    vec3  panelNormal; // panel normal in ECI (attitude-dependent, unit vector)
+    float elevation;   // elevation above local horizon (radians), pre-computed
+    vec3  baseColor;   // satellite tint from SatelliteType
+    float specExp;     // specular exponent from SatelliteType
+    float crossSection;// sqrt(area_m2 / 10): brightness scale (~1 = Starlink-size)
+    float pad0; float pad1; float pad2;
+};
+layout(set = 0, binding = 0) readonly buffer SatInputBuf {
+    SatInput satellites[];
+};
+
+// ── Output: compute writes, vertex reads ─────────────────────────────────────
+// Matches GpuSatVisible (32 bytes, std430).
+struct SatVisible {
+    vec3  skyDir;         // unit vector in local ENU (x=East, y=North, z=Up)
+    float flareIntensity; // [0, 1+] — 0 = invisible/clipped, >1 = bright flare
+    vec3  baseColor;      // pass-through tint
+    float angularSize;    // point sprite size (pixels)
+};
+layout(set = 0, binding = 1) writeonly buffer SatVisibleBuf {
+    SatVisible visible[];
+};
+
+// ── Push constants ────────────────────────────────────────────────────────────
+// GLSL std430 vec3 alignment = 16.  Offsets verified against C++ SatFlarePC.
+layout(push_constant) uniform PC {
+    vec4  enuX;       // East  basis in ECI (w unused) — offset 0
+    vec4  enuY;       // North basis in ECI (w unused) — offset 16
+    vec4  enuZ;       // Up    basis in ECI (w unused) — offset 32
+    vec3  sunDirECI;  // unit vector from Earth toward Sun — offset 48
+    uint  satCount;   // — offset 60
+    vec3  obsECI;     // observer ECI position (meters) — offset 64
+    float pad;        // — offset 76
+} pc;
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const float R_EARTH      = 6371000.0;   // Earth radius (meters)
+const float HORIZON_EL   = -0.01;       // cull if elevation < ~0.6° below horizon
+const float REF_RANGE    = 500000.0;    // 500 km reference distance for 1/r² normalisation
+const float VIS_THRESH   = 0.008;       // flare intensity below this → invisible/clipped
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.satCount) return;
+
+    SatInput sat = satellites[idx];
+
+    // ── Horizon cull ─────────────────────────────────────────────────────────
+    if (sat.elevation < HORIZON_EL) {
+        visible[idx].flareIntensity = 0.0;
+        visible[idx].skyDir         = vec3(0.0, 0.0, 1.0);
+        visible[idx].baseColor      = vec3(0.0);
+        visible[idx].angularSize    = 0.0;
+        return;
+    }
+
+    // ── ECI-relative position → local ENU direction ──────────────────────────
+    vec3 rel = sat.eciRelPos;
+    vec3 enu;
+    enu.x = dot(rel, pc.enuX.xyz);  // East
+    enu.y = dot(rel, pc.enuY.xyz);  // North
+    enu.z = dot(rel, pc.enuZ.xyz);  // Up
+    vec3 skyDir = normalize(enu);
+
+    // ── Distance falloff (inverse-square law, normalised to REF_RANGE) ──────────
+    // Physically: reflected flux ∝ 1/r². Clamped at 1.0 so sats closer than
+    // REF_RANGE don't over-brighten. GEO at 35 786 km ≈ 0.02% of LEO brightness.
+    float distFactor = REF_RANGE / max(sat.range, REF_RANGE);
+    distFactor *= distFactor;  // 1/r²
+
+    // ── Soft Earth shadow (penumbra) ──────────────────────────────────────────
+    // Project satellite into the shadow cylinder and measure how far its cross-
+    // sectional radius is from R_Earth. Smoothstep over ±1% R_Earth (~64 km)
+    // gives a realistic penumbra instead of a hard binary switch.
+    vec3  satAbs    = sat.eciRelPos + pc.obsECI;   // absolute ECI position
+    vec3  shadowDir = -pc.sunDirECI;               // points away from sun
+    float proj      = dot(satAbs, shadowDir);       // + = on the night side
+    vec3  perpVec   = satAbs - proj * shadowDir;    // component ⊥ shadow axis
+    float perpLen   = length(perpVec);
+    float litFactor = (proj > 0.0)
+        ? smoothstep(-R_EARTH * 0.01, R_EARTH * 0.01, perpLen - R_EARTH)
+        : 1.0;
+
+    // ── Specular flare model ──────────────────────────────────────────────────
+    vec3  panelN    = normalize(sat.panelNormal);
+    vec3  satToObs  = normalize(-sat.eciRelPos);      // direction sat → observer (ECI)
+    vec3  reflected = reflect(-pc.sunDirECI, panelN); // reflected sun ray
+    float alignment = dot(reflected, satToObs);        // 1.0 = perfect alignment
+
+    // specExp == 0 means diffuse/isotropic emitter (Space Datacenter etc.).
+    // Use Lambertian phase: brightness ∝ cos(phase angle), where phase angle is
+    // the angle at the satellite between the sun and observer directions.
+    // dot(sunDirECI, satToObs) = cos(phase): 1.0 = observer on sun side (fully lit face
+    // toward observer), 0 = 90° phase, negative = observer sees the backlit side → 0.
+    // This ensures panels facing away from the observer produce no reflected light.
+    float specular  = (sat.specExp < 0.01)
+                        ? max(0.0, dot(pc.sunDirECI, satToObs))
+                        : pow(max(0.0, alignment), sat.specExp);
+    // crossSection = sqrt(area_m² / 10): larger structures reflect proportionally more flux.
+    // A 10 m² satellite has crossSection≈1; a 50 000 m² space datacenter ≈70×.
+    float flare     = specular * litFactor * distFactor * sat.crossSection;
+
+    // ── Daytime sky suppression ───────────────────────────────────────────────
+    // In full daylight the sky is millions of times brighter than a satellite.
+    // Scale visibility threshold by sun elevation so only genuinely bright flares
+    // (Iridium-class, flare > ~0.25) can be seen when the sun is high.
+    // obsUp ≈ normalize(obsECI); sunElev = sin(sun elevation angle).
+    float sunElev      = dot(pc.sunDirECI, normalize(pc.obsECI));
+    float dayBright    = clamp(sunElev * 5.0 + 0.2, 0.0, 1.0); // 0=night, 1=full day
+    float effectFlare  = flare / (1.0 + dayBright * 30.0);
+
+    // ── Cull if below visibility threshold ────────────────────────────────────
+    if (effectFlare < VIS_THRESH) {
+        visible[idx].flareIntensity = 0.0;
+        visible[idx].skyDir         = vec3(0.0, 0.0, 1.0);
+        visible[idx].baseColor      = vec3(0.0);
+        visible[idx].angularSize    = 0.0;
+        return;
+    }
+
+    // ── Point size: grows with flare intensity; capped to avoid giant sprites ─
+    float rangeMm  = sat.range / 1.0e6;
+    float baseSize = max(1.5, 2.5 - rangeMm * 0.4);
+    float angSize  = baseSize + effectFlare * 54.0;
+
+    // ── Output ───────────────────────────────────────────────────────────────
+    visible[idx].skyDir         = skyDir;
+    visible[idx].flareIntensity = effectFlare;
+    visible[idx].baseColor      = sat.baseColor;
+    visible[idx].angularSize    = angSize;
+}
