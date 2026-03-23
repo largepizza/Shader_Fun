@@ -4,6 +4,11 @@ project(ShaderFun VERSION 0.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Static-link the MSVC runtime (/MT in Release, /MTd in Debug) so the exe
+# runs on machines without the Visual C++ Redistributable installed.
+# Must be set before FetchContent so GLFW builds with the same runtime.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # Emit compile_commands.json so VS Code IntelliSense knows all include paths and flags
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

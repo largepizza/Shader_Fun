@@ -51,7 +51,7 @@ struct SatInput {
     float crossSection; // sqrt(area_m² / 10): brightness scale (~1 = Starlink-size)
     float w1;           // secondary surface weight relative to primary (0 = disabled)
     float diffuse;      // isotropic Lambertian floor — structural body scatter [0,1]
-    float pad0;
+    float mirrorFrac;   // fraction of primary surface that is near-perfect mirror [0,1]
 };
 layout(set = 0, binding = 0) readonly buffer SatInputBuf {
     SatInput satellites[];
@@ -86,6 +86,87 @@ const float R_EARTH      = 6371000.0;   // Earth radius (meters)
 const float HORIZON_EL   = -0.01;       // cull if elevation < ~0.6° below horizon
 const float REF_RANGE    = 500000.0;    // 500 km reference distance for 1/r² normalisation
 const float VIS_THRESH   = 0.008;       // flare intensity below this → invisible/clipped
+
+// ── Brightness scale ──────────────────────────────────────────────────────────
+// Global linear multiplier applied to every satellite's computed flux before
+// the visibility threshold and point-size calculations.
+//
+// BRIGHTNESS_SCALE = 1.0  → physically calibrated baseline.
+//   A Starlink at 550 km with only its diffuse floor active produces
+//   effectFlare ≈ 0.008 (right at VIS_THRESH) ≈ apparent magnitude 6.0,
+//   matching real observations of steady-state Starlink (bare-eye limit).
+//
+// Increase to make dim satellites more visible on screen while preserving
+// relative brightness ratios.  Recommended range: 1–10.
+//
+// IMPORTANT: kBrightnessScale in SatelliteSim.cpp must mirror this value
+// so the CPU-side magnitude readout stays consistent with the GPU render.
+const float BRIGHTNESS_SCALE = 12.0;
+
+// ── Magnitude calibration ─────────────────────────────────────────────────────
+// Apparent magnitude is derived from effectFlare via the photometric scale:
+//   magnitude = MAG_REF - 2.5 × log₁₀(effectFlare / MAG_REF_FLARE)
+//
+// Anchor: Starlink Gen1 at 550 km in steady state (diffuse floor only):
+//   effectFlare ≈ 0.008  →  magnitude ≈ 6.0  (at BRIGHTNESS_SCALE = 1)
+//
+// Selected reference points (BRIGHTNESS_SCALE = 1):
+//   effectFlare = 0.008  → mag 6.0   (naked-eye limit, steady-state LEO sat)
+//   effectFlare = 0.025  → mag 5.0   (easily naked-eye, mild specular)
+//   effectFlare = 0.25   → mag 3.5   (notable flare, easily seen)
+//   effectFlare = 1.0    → mag 1.5   (spectacular flare, rivals bright stars)
+//   effectFlare = 8.0    → mag -0.3  (Iridium-class extreme flare)
+//
+// The magnitude is computed on the CPU (updatePositions) using the same
+// formula and reported as "peak magnitude" in the UI readout.
+const float MAG_REF_FLARE = 0.008;
+const float MAG_REF       = 12.0;
+
+// ── Mirror-peak BRDF ──────────────────────────────────────────────────────────
+// Real satellites carry polished surfaces — solar-panel glass, phased-array
+// faceplates, MLI foil — that act as near-perfect specular reflectors within
+// a very narrow angular window around the sun-satellite-observer alignment.
+// The Phong lobe already models the broad specular shoulder; this term adds
+// the sharp delta-function spike that causes extreme "Iridium-class" flares.
+//
+// MIRROR_BOOST: peak brightness multiplier at perfect alignment (dot=1).
+//   300 ≈ +6.2 mag above the normal Phong peak.
+//
+// mirrorExp: angular half-power width of the mirror peak.
+//   max(specExp0 × 300, 8000) → roughly 0.25° half-power width
+//   (matches the ~0.26° angular radius of the solar disk — physically correct
+//    for a geometrically flat mirror reflecting the whole solar image).
+//
+// sat.mirrorFrac: fraction of the primary surface that is mirror-quality.
+//   Per SatelliteType; 0.0 disables the peak entirely.
+//   Suggested values — Starlink: 0.05, GEO: 0.1, ISS: 0.15
+//
+// Peak magnitude at perfect alignment (BRIGHTNESS_SCALE=3):
+//   Starlink (mirrorFrac=0.05): spec0 ≈ 11   → effectFlare ≈ 27  → mag ≈ -2.7
+//   ISS      (mirrorFrac=0.15): spec0 ≈ 32   → effectFlare ≈ 1260 → mag ≈ -7.5
+//   GEO      (mirrorFrac=0.10): spec0 ≈ 22   → GEO distFactor ≈ 2e-4 → mag ≈ +4.6
+const float MIRROR_BOOST = 300.0;
+
+// ── Daytime sky suppression ───────────────────────────────────────────────────
+// Models sky background glare washing out dim satellites.
+//
+// dayBright ramp: squared, from sun elevation ≈ −3° to +20°.
+//   Squaring means brightness rises slowly near the terminator (gradual twilight)
+//   and faster once the sun is well up — matching real sky brightness behaviour.
+//   At the terminator itself (sunElev≈0) dayBright ≈ 0.02, so barely any
+//   suppression and satellites remain visible as they cross into daylight.
+//
+// BRIGHTNESS_SCALE is NOT in the denominator.  flare already contains it in the
+// numerator; adding it here too would cancel it, making bright flares no more
+// survivable than dim ones.  Only the physical sky contrast ratio belongs here.
+//
+// Calibration at full day (dayBright=1, BRIGHTNESS_SCALE=6):
+//   denominator = 151
+//   Starlink diffuse floor   (flare ≈ 0.048): effectFlare ≈ 0.0003 → invisible ✓
+//   Starlink peak Phong      (flare ≈ 0.6  ): effectFlare ≈ 0.004  → invisible ✓
+//   Starlink mirror peak     (flare ≈ 30   ): effectFlare ≈ 0.20   → visible   ✓
+//   ISS mirror peak          (flare ≈ 480  ): effectFlare ≈ 3.2    → brilliant ✓
+const float DAY_SUPPRESSION = 150.0;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -173,19 +254,30 @@ void main() {
                     ? max(0.0, dot(pc.sunDirECI, satToObs))
                     : pow(max(0.0, dot(refl1, satToObs)), sat.specExp1));
 
+    // ── Mirror peak: ultra-narrow specular spike ──────────────────────────────
+    // Added on top of spec0 (primary Phong lobe).  Only fires when the
+    // sun-satellite-observer triangle is almost perfectly aligned.
+    // mirrorExp ≫ specExp0 → sub-degree angular width (vs. ~15° for Phong lobe).
+    float mirrorExp  = max(sat.specExp0 * 300.0, 8000.0);
+    float mirrorDot  = max(0.0, dot(refl0, satToObs));
+    float mirrorPeak = irr0 * pow(mirrorDot, mirrorExp) * MIRROR_BOOST;
+    spec0 += mirrorPeak * sat.mirrorFrac;
+
     // crossSection = sqrt(area_m² / 10): larger structures reflect proportionally more flux.
     // A 10 m² satellite has crossSection≈1; a 50 000 m² space datacenter ≈70×.
     float specular = spec0 + spec1 * sat.w1 + sat.diffuse;
-    float flare    = specular * litFactor * distFactor * sat.crossSection;
+    float flare    = specular * litFactor * distFactor * sat.crossSection * BRIGHTNESS_SCALE;
 
     // ── Daytime sky suppression ───────────────────────────────────────────────
-    // In full daylight the sky is millions of times brighter than a satellite.
-    // Scale visibility threshold by sun elevation so only genuinely bright flares
-    // (Iridium-class, flare > ~0.25) can be seen when the sun is high.
-    // obsUp ≈ normalize(obsECI); sunElev = sin(sun elevation angle).
-    float sunElev      = dot(pc.sunDirECI, normalize(pc.obsECI));
-    float dayBright    = clamp(sunElev * 5.0 + 0.2, 0.0, 1.0); // 0=night, 1=full day
-    float effectFlare  = flare / (1.0 + dayBright * 30.0);
+    // sunElev = sin(sun elevation angle above observer's horizon).
+    // Ramp: squared linear from −3° (sunElev≈−0.05) to +20° (sunElev≈0.34).
+    //   At the terminator (sunElev=0): t=0.13, dayBright≈0.017 → ~2.5% suppression.
+    //   At +20° sun elevation:         t=1.0,  dayBright=1.0   → full suppression.
+    // Squaring gives a slow start (gentle twilight glow) and faster mid-day ramp.
+    float sunElev     = dot(pc.sunDirECI, normalize(pc.obsECI));
+    float t           = clamp((sunElev + 0.05) / 0.39, 0.0, 1.0);
+    float dayBright   = t * t;
+    float effectFlare = flare / (1.0 + dayBright * DAY_SUPPRESSION);
 
     // ── Cull if below visibility threshold ────────────────────────────────────
     if (effectFlare < VIS_THRESH) {

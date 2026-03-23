@@ -61,6 +61,9 @@ struct SatelliteType
     SurfaceSpec  secondary;       // optional second surface — set weight=0 to disable
     float        diffuse;         // isotropic Lambertian floor: always visible fraction [0,1]
                                   // models structural body scatter; applied after litFactor
+    float        mirrorFrac;      // fraction of primary surface that is near-perfect mirror [0,1]
+                                  // adds ultra-narrow specular spike (MIRROR_BOOST×) on top of Phong lobe
+                                  // 0.0 = no mirror peak; 0.05 = Starlink; 0.15 = ISS solar panels
 };
 
 // ── Constellation descriptor ───────────────────────────────────────────────────
@@ -111,7 +114,7 @@ struct GpuSatInput
     float     crossSection; // sqrt(crossSectionM2 / 10.0): area brightness scale (~1 = 10 m²)
     float     w1;           // secondary surface weight relative to primary (0 = disabled)
     float     diffuse;      // isotropic Lambertian floor — structural body scatter [0,1]
-    float     _pad;         // pad to 80 bytes (std430 alignment)
+    float     mirrorFrac;   // fraction of primary surface that is near-perfect mirror [0,1]
 };
 static_assert(sizeof(GpuSatInput) == 80, "GpuSatInput layout mismatch");
 
@@ -224,6 +227,7 @@ struct SatOrbit
     float tumbleRate;     // rotation rate (rad/s); 0 = not tumbling
     float tumblePhase;    // initial rotation angle (radians)
     glm::vec3 tumbleAxis; // fixed body tumble axis (unit vector in ECI)
+    bool alignTerminator; // if true, incl/raan are recomputed from sunDirECI each frame
 };
 
 // ── SatelliteSim ──────────────────────────────────────────────────────────────
@@ -288,12 +292,23 @@ private:
 
     // ── Simulation state ──────────────────────────────────────────────────────
     SkyCamera camera;
-    double simTime    = 0.0;
+    double simTime      = 0.0;
+    double simTimeAtInit = 0.0;
     int    timeScaleIdx = 1;
     bool   timePaused   = false;
     float  timeDir      = 1.0f;  // +1 = forward, -1 = reverse
+    // Observer position/facing in Earth-fixed ECEF — canonical movement state.
+    // obsLatDeg / obsLonDeg are display caches derived each frame; camera.azDeg is also derived.
+    // Initial: lat=37°N lon=0°, facing north.
+    //   obsDir    = (cos37°, 0, sin37°)       ≈ (0.7986, 0, 0.6018)
+    //   obsFacing = north at that pos          ≈ (-0.6018, 0, 0.7986)
+    glm::vec3 obsDir    = { 0.7986f,  0.0f, 0.6018f }; // unit position vector
+    glm::vec3 obsFacing = {-0.6018f,  0.0f, 0.7986f }; // unit tangent (forward direction)
+    float  obsLatDeg    = 37.0f; // display cache — derived from obsDir
+    float  obsLonDeg    =  0.0f; // display cache — derived from obsDir
     uint32_t activeSatCount = 0;
     uint32_t visibleCount   = 0;
+    float    peakMagnitude  = 99.0f; // brightest steady-state sat visible this frame (lower = brighter)
 
     // ── UI visibility & settings ──────────────────────────────────────────────
     bool uiVisible    = true;
@@ -335,13 +350,15 @@ private:
     float dmx = 0, dmy = 0; // accumulated delta for this frame
 
     // ── UI hover state (one-frame lag) ────────────────────────────────────────
-    bool hovConst[10]   = {};
-    bool hovTimeSlower  = false;
-    bool hovTimePause   = false;
-    bool hovTimeFaster  = false;
-    bool hovSettings    = false;
+    bool hovConst[10]     = {};
+    bool hovTimeSlower    = false;
+    bool hovTimePause     = false;
+    bool hovTimeFaster    = false;
+    bool hovLatSouth      = false;
+    bool hovLatNorth      = false;
+    bool hovSettings      = false;
     bool hovSettingsClose = false;
-    bool hovRebind[8]   = {}; // per keybinding row
+    bool hovRebind[8]     = {}; // per keybinding row
 
     // ── Private helpers ───────────────────────────────────────────────────────
     void createBuffers(VulkanContext &ctx);

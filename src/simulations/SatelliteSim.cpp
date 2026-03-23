@@ -14,11 +14,29 @@
 // ── Earth + observer constants ─────────────────────────────────────────────────
 static constexpr float kEarthRadius = 6'371'000.0f; // mean Earth radius (m)
 static constexpr double kOmegaEarth = 7.2921150e-5; // sidereal rotation rate (rad/s)
-static constexpr float kObsLatDeg = 37;
-static constexpr float kObsLat = glm::radians(kObsLatDeg);
+static constexpr float kObsLatDefault = 37.0f;      // default observer latitude (°N, ~Bay Area)
 
 // ── Orbital mechanics ─────────────────────────────────────────────────────────
-static constexpr double kGM = 3.986004418e14; // Earth gravitational parameter (m³/s²)
+static constexpr double kGM       = 3.986004418e14; // Earth gravitational parameter (m³/s²)
+static constexpr double kJ2       = 1.08263e-3;     // Earth oblateness (J2) coefficient
+static constexpr double kYearSec  = 365.25 * 86400.0; // seconds per tropical year
+// SSO nodal precession rate = Earth's mean orbital motion ≈ 0.9856°/day eastward.
+// J2 causes a retrograde circular orbit (i > 90°) to precess its RAAN eastward at
+// exactly this rate, keeping the nodal plane fixed relative to the sun.
+static constexpr double kSSOPrecRate = 2.0 * 3.14159265358979323846 / kYearSec; // rad/s
+
+// ── Photometry (must mirror sat_flare.comp constants) ────────────────────────
+// kBrightnessScale MUST stay in sync with BRIGHTNESS_SCALE in sat_flare.comp.
+// kMagRef and kMagRefFlare define the calibration anchor for the magnitude readout.
+static constexpr float kBrightnessScale = 6.0f;  // mirror BRIGHTNESS_SCALE in sat_flare.comp
+static constexpr float kDaySuppression = 150.0f; // mirror DAY_SUPPRESSION in sat_flare.comp
+static constexpr float kRefRange = 500'000.0f;   // 500 km normalisation range (m)
+static constexpr float kMagRef = 6.0f;           // apparent magnitude at kMagRefFlare
+static constexpr float kMagRefFlare = 0.008f;    // effectFlare corresponding to kMagRef
+// Virtual diffuse floor for the magnitude readout only (not sent to GPU).
+// Zero-diffuse satellites (Starlink) are only visible via transient specular flares;
+// this floor lets them appear in the readout as a meaningful steady-state estimate.
+static constexpr float kMagDiffuseFloor = 0.003f;
 
 static inline float computeMeanMotion(float altM)
 {
@@ -35,6 +53,7 @@ void SatelliteSim::init(VulkanContext &ctx)
         auto now = std::chrono::system_clock::now();
         auto j2000 = std::chrono::system_clock::from_time_t(946728000);
         simTime = std::chrono::duration<double>(now - j2000).count();
+        simTimeAtInit = simTime;
     }
 
     ctx_ = &ctx;
@@ -52,8 +71,8 @@ void SatelliteSim::init(VulkanContext &ctx)
     createComputePipeline(ctx);
     createSkyBgPipeline(ctx);
     createDrawPipeline(ctx);
+    updatePositions(simTime); // must run first — initConstellation reads sunDirECI
     initConstellation();
-    updatePositions(simTime);
     initStars(ctx);
 }
 
@@ -76,6 +95,39 @@ void SatelliteSim::onResize(VulkanContext &ctx)
 // ─── recordCompute ────────────────────────────────────────────────────────────
 void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float dt)
 {
+    // ── WASD surface navigation ───────────────────────────────────────────────
+    // Pure 3D ECEF — no lat/lon arithmetic, no gimbal lock, works at any latitude.
+    //
+    // obsDir    : unit position vector on the Earth-fixed sphere.
+    // obsFacing : unit tangent vector (forward), always ⊥ obsDir.
+    //
+    // W/S move along obsFacing; A/D move along cross(obsFacing, obsDir) (right).
+    // After each step obsFacing is parallel-transported to stay tangent at newPos.
+    if (win)
+    {
+        bool shift = glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+        float speed = shift ? 0.5f : 0.08f; // radians of arc per real second
+
+        float fwd = (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS ? 1.0f : 0.0f) - (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS ? 1.0f : 0.0f);
+        float right = (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS ? 1.0f : 0.0f) - (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS ? 1.0f : 0.0f);
+
+        if (fwd != 0.0f || right != 0.0f)
+        {
+            // right tangent = cross(obsFacing, obsDir)  (right-hand rule: forward × up = right)
+            glm::vec3 rightDir = glm::normalize(glm::cross(obsFacing, obsDir));
+            glm::vec3 newPos = glm::normalize(
+                obsDir + speed * dt * (fwd * obsFacing + right * rightDir));
+
+            // Parallel-transport obsFacing: project out any radial component at newPos.
+            obsFacing = glm::normalize(obsFacing - glm::dot(obsFacing, newPos) * newPos);
+            obsDir = newPos;
+
+            // Refresh display caches (atan2(0,0)==0 at poles — fine for display only)
+            obsLatDeg = glm::degrees(asinf(glm::clamp(obsDir.z, -1.0f, 1.0f)));
+            obsLonDeg = glm::degrees(atan2f(obsDir.y, obsDir.x));
+        }
+    }
+
     if (!timePaused)
         simTime += (double)dt * kTimeScales[timeScaleIdx] * timeDir;
     updatePositions(simTime);
@@ -208,9 +260,35 @@ static const char *keyDisplayName(int key)
 // ─── buildUI ──────────────────────────────────────────────────────────────────
 void SatelliteSim::buildUI(float dt, UIRenderer &ui)
 {
-    // Apply camera mouse look (uses previous frame's delta, reset after).
+    // Apply camera mouse look.
+    // Yaw  (dmx): rotate obsFacing around obsDir via Rodrigues — no ENU frame, no pole issue.
+    // Pitch (dmy): handled by camera.update → camera.elDeg as usual.
     if (win)
-        camera.update(win, dmx, dmy);
+    {
+        camera.update(win, 0.0f, dmy); // pitch only; we handle yaw below
+
+        if (camera.captured && dmx != 0.0f)
+        {
+            // cross(obsDir, obsFacing) is the LEFT tangent, so negate angle for look-right.
+            float angle = glm::radians(-dmx * camera.sens);
+            glm::vec3 leftDir = glm::cross(obsDir, obsFacing);
+            obsFacing = glm::normalize(cosf(angle) * obsFacing + sinf(angle) * leftDir);
+        }
+
+        // Derive camera.azDeg from obsFacing projected into the local Earth-fixed ENU.
+        // Only used for the view matrix — never fed back into movement math.
+        {
+            float sL = obsDir.z;
+            float cLH = sqrtf(obsDir.x * obsDir.x + obsDir.y * obsDir.y);
+            float inv = (cLH > 1e-7f) ? 1.0f / cLH : 0.0f;
+            float cLn = obsDir.x * inv, sLn = obsDir.y * inv;
+            glm::vec3 eastEF = {-sLn, cLn, 0.0f};
+            glm::vec3 northEF = {-sL * cLn, -sL * sLn, cLH};
+            camera.azDeg = glm::degrees(atan2f(
+                glm::dot(obsFacing, eastEF),
+                glm::dot(obsFacing, northEF)));
+        }
+    }
     dmx = dmy = 0.0f;
 
     const UIInput &inp = ui.input();
@@ -277,6 +355,19 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
         CLAY_TEXT(visStr,
                   CLAY_TEXT_CONFIG({.textColor = {140, 170, 220, 220}, .fontSize = 13}));
 
+        // Brightest visible satellite (steady-state, no specular flare).
+        // Formula: effectFlare = diffuse × (500km/range)² × crossSection × BRIGHTNESS_SCALE
+        //          magnitude   = 6.0 − 2.5 × log₁₀(effectFlare / 0.008)
+        // 99.0 = no satellites visible above horizon (or all in daylight).
+        static char magBuf[40];
+        if (peakMagnitude < 90.0f)
+            snprintf(magBuf, sizeof(magBuf), "Peak mag  %.1f  (steady state)", peakMagnitude);
+        else
+            snprintf(magBuf, sizeof(magBuf), "Peak mag  --");
+        Clay_String magStr{false, (int32_t)strlen(magBuf), magBuf};
+        CLAY_TEXT(magStr,
+                  CLAY_TEXT_CONFIG({.textColor = {160, 200, 160, 200}, .fontSize = 13}));
+
         static char sunBuf[32];
         float sunElDeg = glm::degrees(asinf(glm::clamp(sunDirENU.w, -1.0f, 1.0f)));
         snprintf(sunBuf, sizeof(sunBuf), "Sun elev  %.1f°", sunElDeg);
@@ -299,6 +390,113 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
         Clay_String fpsStr{false, (int32_t)strlen(fpsBuf), fpsBuf};
         CLAY_TEXT(fpsStr,
                   CLAY_TEXT_CONFIG({.textColor = {120, 180, 120, 200}, .fontSize = 12}));
+
+        // ── Observer position control ─────────────────────────────────────────
+        // Latitude:  [◄] [►] buttons (5°/step) or scroll wheel over the readout.
+        // Longitude: WASD moves in camera bearing (10°/s; Shift = 60°/s).
+        //            A/D = strafe, W/S = forward/back relative to look direction.
+        static char latBuf[20];
+        float absLat = fabsf(obsLatDeg);
+        snprintf(latBuf, sizeof(latBuf), "%.1f\xc2\xb0 %c", absLat, obsLatDeg >= 0.0f ? 'N' : 'S');
+        Clay_String latStr{false, (int32_t)strlen(latBuf), latBuf};
+
+        // Set latitude while keeping the current longitude direction stored in obsDir.xy,
+        // and parallel-transport obsFacing so it stays tangent after the position jump.
+        auto setLat = [this](float newLatDeg)
+        {
+            newLatDeg = glm::clamp(newLatDeg, -90.0f, 90.0f);
+            float sinL = sinf(glm::radians(newLatDeg));
+            float cosL = cosf(glm::radians(newLatDeg));
+            glm::vec2 xy = glm::vec2(obsDir.x, obsDir.y);
+            float xyMag = glm::length(xy);
+            if (xyMag > 1e-6f)
+                xy /= xyMag;
+            else
+                xy = {1.0f, 0.0f};
+            obsDir = {xy.x * cosL, xy.y * cosL, sinL};
+            obsFacing = glm::normalize(obsFacing - glm::dot(obsFacing, obsDir) * obsDir);
+            obsLatDeg = newLatDeg;
+            obsLonDeg = glm::degrees(atan2f(obsDir.y, obsDir.x));
+        };
+
+        const int kLatBtnSz = 22;
+        const int kLatIconSz = 14;
+        CLAY(CLAY_ID("LatRow"), {.layout = {
+                                     .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                                     .childGap = 4,
+                                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                     .layoutDirection = CLAY_LEFT_TO_RIGHT}})
+        {
+            CLAY_TEXT(CLAY_STRING("Lat"),
+                      CLAY_TEXT_CONFIG({.textColor = {140, 150, 180, 200}, .fontSize = 13}));
+
+            // South (−) button
+            Clay_Color sBg = hovLatSouth ? Clay_Color{60, 60, 110, 230} : Clay_Color{28, 28, 52, 210};
+            CLAY(CLAY_ID("LatSBtn"), {.layout = {
+                                          .sizing = {CLAY_SIZING_FIXED(kLatBtnSz), CLAY_SIZING_FIXED(kLatBtnSz)},
+                                          .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                      .backgroundColor = sBg,
+                                      .cornerRadius = CLAY_CORNER_RADIUS(3)})
+            {
+                hovLatSouth = Clay_Hovered();
+                if (hovLatSouth && inp.lmbPressed)
+                    setLat(obsLatDeg - 5.0f);
+                CLAY(CLAY_ID("LatSIcon"), {.layout = {.sizing = {CLAY_SIZING_FIXED(kLatIconSz), CLAY_SIZING_FIXED(kLatIconSz)}},
+                                           .image = {.imageData = (void *)(intptr_t)kIconAngleLeft}}) {}
+            }
+
+            // Latitude readout — scroll wheel adjusts by 5° per notch
+            CLAY(CLAY_ID("LatDisplay"), {.layout = {
+                                             .sizing = {CLAY_SIZING_FIXED(68), CLAY_SIZING_FIT(0)},
+                                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
+            {
+                if (Clay_Hovered() && inp.scrollY != 0.0f)
+                    setLat(obsLatDeg + inp.scrollY * 5.0f);
+                CLAY_TEXT(latStr,
+                          CLAY_TEXT_CONFIG({.textColor = {210, 230, 190, 255}, .fontSize = 13}));
+            }
+
+            // North (+) button
+            Clay_Color nBg = hovLatNorth ? Clay_Color{60, 60, 110, 230} : Clay_Color{28, 28, 52, 210};
+            CLAY(CLAY_ID("LatNBtn"), {.layout = {
+                                          .sizing = {CLAY_SIZING_FIXED(kLatBtnSz), CLAY_SIZING_FIXED(kLatBtnSz)},
+                                          .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                      .backgroundColor = nBg,
+                                      .cornerRadius = CLAY_CORNER_RADIUS(3)})
+            {
+                hovLatNorth = Clay_Hovered();
+                if (hovLatNorth && inp.lmbPressed)
+                    setLat(obsLatDeg + 5.0f);
+                CLAY(CLAY_ID("LatNIcon"), {.layout = {.sizing = {CLAY_SIZING_FIXED(kLatIconSz), CLAY_SIZING_FIXED(kLatIconSz)}},
+                                           .image = {.imageData = (void *)(intptr_t)kIconAngleRight}}) {}
+            }
+        }
+
+        // Longitude readout (WASD is the primary control — no buttons needed)
+        static char lonBuf[20];
+        float absLon = fabsf(obsLonDeg);
+        snprintf(lonBuf, sizeof(lonBuf), "%.1f\xc2\xb0 %c", absLon, obsLonDeg >= 0.0f ? 'E' : 'W');
+        CLAY(CLAY_ID("LonRow"), {.layout = {
+                                     .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                                     .childGap = 4,
+                                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                     .layoutDirection = CLAY_LEFT_TO_RIGHT}})
+        {
+            CLAY_TEXT(CLAY_STRING("Lon"),
+                      CLAY_TEXT_CONFIG({.textColor = {140, 150, 180, 200}, .fontSize = 13}));
+            CLAY(CLAY_ID("LonSpacer"), {.layout = {.sizing = {CLAY_SIZING_FIXED(kLatBtnSz), CLAY_SIZING_FIT(0)}}}) {}
+            CLAY(CLAY_ID("LonDisplay"), {.layout = {
+                                             .sizing = {CLAY_SIZING_FIXED(68), CLAY_SIZING_FIT(0)},
+                                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
+            {
+                Clay_String lonStr{false, (int32_t)strlen(lonBuf), lonBuf};
+                CLAY_TEXT(lonStr,
+                          CLAY_TEXT_CONFIG({.textColor = {210, 230, 190, 255}, .fontSize = 13}));
+            }
+        }
+
+        CLAY_TEXT(CLAY_STRING("WASD move \xc2\xb7 Shift sprint"),
+                  CLAY_TEXT_CONFIG({.textColor = {100, 110, 140, 160}, .fontSize = 11}));
     }
 
     // ── Constellation toggles (top-right) ─────────────────────────────────────
@@ -1011,7 +1209,7 @@ void SatelliteSim::initStars(VulkanContext &ctx)
                       glm::clamp(1.00f - 0.90f * bv, 0.10f, 1.0f)}; // B
 
         // Point sprite size: 1.5 px for faint stars, up to ~5.5 px for Sirius.
-        float starScale = 2.0f; // tweak this to make stars bigger/smaller overall
+        float starScale = 4.0f; // tweak this to make stars bigger/smaller overall
         float angSize = 1.5f + glm::min(rawInt, 4.0f) * 1.0f;
         angSize *= starScale;
 
@@ -1202,48 +1400,65 @@ void SatelliteSim::initConstellation()
     //   secondary — optional second surface (radiators perpendicular to primay)
     //               weight=0 disables it; Perpendicular attitude = cross(surfN0, satNadir)
     //   diffuse   — constant Lambertian floor for structural body scatter (always visible)
+
+    // AI SAT
+    // 175 m estimate, 1820 x 72
+    // scale 1820px / 175 m
+    // 870 * 72 px panels
+    // 200 x 55 px radiator panels
+
+    float px_scale = 1820.0f / 175.0f;                                         // ~10.4 px/meter for the bus/antenna face
+    float ai_sat_panel_area = (870.0f * 72.0f * 2.0f) / (px_scale * px_scale); // ~600 m² total panel area
+    float ai_sat_radiator_area = (200.0f * 55.0f) / (px_scale * px_scale);     // ~100 m² total radiator area
+
     satTypes = {
         {// 0 — Starlink: flat phased-array face toward Earth, brief intense flares
          "Starlink",
          {0.80f, 0.87f, 1.00f},                      // cool blue-white
-         100.0f,                                     // ~10 m² bus + visor
+         10.0f,                                      // ~10 m² bus + visor
          {AttitudeMode::NadirPointing, 18.0f, 1.0f}, // very sharp specular (flat mirror-like face)
          {AttitudeMode::Perpendicular, 0.0f, 0.0f},  // no significant secondary surface
-         0.0f},                                      // no diffuse floor
+         0.0f,                                       // no diffuse floor (visor-darkened)
+         0.05f},                                     // mirrorFrac: polished phased-array glass → mag ~-2.7 at perfect alignment
         {                                            // 1 — LEO broadband (OneWeb/Kuiper/Xingwang/Telesat): sun-tracking panels
          "LEO Broadband",
          {1.00f, 0.92f, 0.75f}, // warm white
-         120.0f,                // ~12 m² typical LEO broadband bus + panels
+         12.0f,                 // ~12 m² typical LEO broadband bus + panels
          {AttitudeMode::SunTracking, 6.0f, 1.0f},
          {AttitudeMode::Perpendicular, 0.0f, 0.0f},
-         0.0f},
-        {// 2 — GEO Comsat: large sun-tracking panels + body radiators facing away from Earth
+         0.0f,   // no diffuse floor
+         0.02f}, // mirrorFrac: moderate — sun-tracking panels occasionally flash
+        {        // 2 — GEO Comsat: large sun-tracking panels + body radiators facing away from Earth
          "GEO Comsat",
          {0.95f, 0.95f, 1.00f},                    // near-white
          50.0f,                                    // ~50 m² (large GEO body + wings)
          {AttitudeMode::SunTracking, 3.0f, 1.00f}, // broad lobe solar wings
          {AttitudeMode::AntiNadir, 2.0f, 0.10f},   // body radiators face deep space
-         0.01f},                                   // slight structural glow
+         0.01f,                                    // slight structural glow
+         0.10f},                                   // mirrorFrac: large polished antenna dishes, well-aligned
         {                                          // 3 — ISS: enormous truss-mounted solar arrays AND large radiator panels.
          // The PVTCS and EATCS radiators (~900 m² NH3 panels on the ITS) face away from
          // Earth for maximum view factor to cold space. From the ground: ISS at zenith shows
          // the back of the radiators (dim); ISS near the horizon shows the radiator face.
          "ISS",
          {1.00f, 0.85f, 0.70f}, // warm golden (solar array color)
-         250000.0f,
+         250.0f,
          {AttitudeMode::SunTracking, 8.0f, 1.00f}, // truss-mounted solar arrays
          {AttitudeMode::AntiNadir, 4.0f, 0.35f},   // large radiator panels (ITS) face deep space
-         0.04f},                                   // complex truss/module body
+         0.04f,                                    // complex truss/module body
+         0.15f},                                   // mirrorFrac: highly polished solar panel glass → mag ~-7.5 at peak
         {                                          // 4 — SpaceX ODC (FCC filing Jan 2026): Starlink-class bus with large radiator panels
          // for compute heat rejection. Nadir-pointing phased array + deep-space-facing radiators.
          // Flat compute/antenna face produces brief nadir flares; radiator face brightens near
          // the horizon (AntiNadir face tilts toward the observer as satellite descends).
-         "SpaceX ODC",
-         {0.65f, 1.00f, 0.92f},                   // cyan-teal (distinct from Starlink blue-white)
-         5000000.0f,                              // ~15 m² — Starlink-class bus + extra radiator area
-         {AttitudeMode::SunTracking, 8.0f, 1.0f}, // phased-array/compute face toward Earth
-         {AttitudeMode::AntiNadir, 3.0f, 0.25f},  // large radiator panels face deep space
-         0.001f},                                 // slight structural body scatter
+
+         "SpaceX AI Sats",
+         {1.00f, 1.00f, 0.92f},                      // cyan-teal (distinct from Starlink blue-white)
+         ai_sat_panel_area,                          // ~15 m² — Starlink-class bus + extra radiator area
+         {AttitudeMode::SunTracking, 18.0f, 1.0f},   // phased-array/compute face toward Earth
+         {AttitudeMode::Perpendicular, 7.0f, 0.25f}, // large radiator panels face deep space
+         0.005f,                                     // minimal structural body scatter
+         0.10f},                                     // mirrorFrac: similar to Starlink — polished compute face
     };
 
     // ── Constellation shells ───────────────────────────────────────────────────
@@ -1348,7 +1563,7 @@ void SatelliteSim::initConstellation()
         //   Disk+alignTerminator places the ring in the Earth-Sun terminator plane, visually
         //   representing where SSO satellites dwell relative to the day/night boundary.
         //   200 × 100 = 20,000 sats spread across 10 rings from ~575 km to ~1,925 km.
-        {"SpaceX ODC SSO",
+        {"SpaceX AI Sat",
          1'250'000.0f, // altM:      1,250 km — ring centre altitude
          0.0f,         // incl:      ignored (alignTerminator=true overrides)
          200,          // numPlanes: × perPlane = total sats (200×100 = 20,000)
@@ -1356,7 +1571,7 @@ void SatelliteSim::initConstellation()
          4u,           // typeIdx:   SpaceX ODC (NadirPointing + AntiNadir radiators)
          true,         // enabled
          OrbitDistribution::Disk,
-         10000.0f,    // altJitterM:      no per-satellite altitude scatter
+         5000.0f,     // altJitterM:      no per-satellite altitude scatter
          0.0f,        // raan:            ignored (alignTerminator=true)
          true,        // alignTerminator: orbital plane = terminator plane (tracks Sun)
          10,          // numRings:        10 concentric rings
@@ -1377,7 +1592,7 @@ void SatelliteSim::initConstellation()
                 for (int s = 0; s < c.perPlane; ++s)
                 {
                     float u0 = (float)rand() / (float)RAND_MAX * glm::two_pi<float>();
-                    satOrbits.push_back({raan, c.incl, u0, c.typeIdx, c.altM, 0.0f, 0.0f, {0.0f, 0.0f, 1.0f}});
+                    satOrbits.push_back({raan, c.incl, u0, c.typeIdx, c.altM, 0.0f, 0.0f, {0.0f, 0.0f, 1.0f}, false});
                 }
             }
         }
@@ -1401,7 +1616,7 @@ void SatelliteSim::initConstellation()
                 float tumblePhase = (float)rand() / RAND_MAX * glm::two_pi<float>();
 
                 satOrbits.push_back({raan, incl, u0, c.typeIdx, altM,
-                                     tumbleRate, tumblePhase, axis});
+                                     tumbleRate, tumblePhase, axis, false});
             }
         }
         else if (c.distribution == OrbitDistribution::Disk)
@@ -1411,12 +1626,21 @@ void SatelliteSim::initConstellation()
             float raan_d = c.raan;
             if (c.alignTerminator)
             {
-                // Terminator plane: normal = sunDirECI.
-                // orbit_normal = (sin(i)sin(Ω), -sin(i)cos(Ω), cos(i)) = sunDirECI
+                // Inclination: derived from sunDirECI.z at epoch so that the orbit
+                // normal exactly equals sunDirECI — this places every satellite in
+                // the terminator plane at t=0, matching the original visual intent.
+                //   orbit_normal = sunDirECI  →  cos(i) = sun.z  →  i = acos(sun.z)
+                // Inclination is then FIXED for all time; only RAAN precesses.
+                // This avoids the seasonal inclination swings (67°–113°) that caused
+                // "weird results near the poles during winter/summer."
                 incl_d = acosf(glm::clamp(sunDirECI.z, -1.0f, 1.0f));
-                float sI = sinf(incl_d);
-                raan_d = (sI > 1e-5f)
-                             ? atan2f(sunDirECI.x / sI, -sunDirECI.y / sI)
+
+                // Initial RAAN: solving orbit_normal = sunDirECI for Ω gives
+                //   sin(Ω) = sun.x / sin(i),  cos(Ω) = −sun.y / sin(i)
+                //   → Ω₀ = atan2(sun.x, −sun.y)   (division by sin(i) cancels in atan2)
+                float sinI = sinf(incl_d);
+                raan_d = (sinI > 1e-5f)
+                             ? atan2f(sunDirECI.x, -sunDirECI.y)
                              : 0.0f;
             }
 
@@ -1430,6 +1654,7 @@ void SatelliteSim::initConstellation()
             {
                 // Altitude: centre-offset each ring around c.altM.
                 float ringAlt = c.altM + (r - (nr - 1) * 0.5f) * c.ringSpacingM;
+                float ringIncl = incl_d; // same inclination for all rings (flat disk)
 
                 // Model incomplete constellation, vary number of sats per ring to fill totalSats without exceeding it.
                 int satsInThisRing = glm::min(perRing, totalSats - r * perRing);
@@ -1439,7 +1664,7 @@ void SatelliteSim::initConstellation()
                     // Evenly spaced around the ring + optional small jitter.
                     float u0 = (float)s / satsInThisRing * glm::two_pi<float>();
                     float jitter = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * c.altJitterM;
-                    satOrbits.push_back({raan_d, incl_d, u0, c.typeIdx, ringAlt + jitter, 0.0f, 0.0f, {0.0f, 0.0f, 1.0f}});
+                    satOrbits.push_back({raan_d, ringIncl, u0, c.typeIdx, ringAlt + jitter, 0.0f, 0.0f, {0.0f, 0.0f, 1.0f}, c.alignTerminator});
                 }
             }
         }
@@ -1492,8 +1717,18 @@ void SatelliteSim::updatePositions(double t)
 {
     // ── Observer ECI position (rotates with Earth) ────────────────────────────
     // fmod keeps the angle small so float trig precision is maintained at large t.
-    float theta = (float)fmod(kOmegaEarth * t, glm::two_pi<double>());
-    float cosLat = cosf(kObsLat), sinLat = sinf(kObsLat);
+    // Add the Earth-fixed longitude offset to the GMST angle.
+    // kOmegaEarth * t  = Greenwich Meridian Sidereal Time (Earth's rotation since epoch).
+    // obsLonRad        = observer's geodetic longitude in the Earth-fixed frame.
+    // Together: the observer sits at geodetic (obsLatDeg, obsLonDeg) rotating with Earth.
+    // Derive lat/lon from obsDir (canonical state) — stable at all latitudes.
+    float sinLat = obsDir.z;
+    float cosLat = sqrtf(obsDir.x * obsDir.x + obsDir.y * obsDir.y);
+    float obsLonRad = atan2f(obsDir.y, obsDir.x); // safe: cosLat >= 0 always
+    float theta = (float)fmod(kOmegaEarth * t + (double)obsLonRad, glm::two_pi<double>());
+    // Refresh display caches each frame so UI stays in sync regardless of who moved obsDir.
+    obsLatDeg = glm::degrees(asinf(glm::clamp(sinLat, -1.0f, 1.0f)));
+    obsLonDeg = glm::degrees(obsLonRad);
     float cosLon = cosf(theta), sinLon = sinf(theta);
 
     obsECI = glm::vec3{kEarthRadius * cosLat * cosLon,
@@ -1548,6 +1783,7 @@ void SatelliteSim::updatePositions(double t)
 
     // ── Per-constellation satellite geometry ──────────────────────────────────
     visibleCount = 0;
+    peakMagnitude = 99.0f; // reset each frame; updated below for each visible sat
     for (const ConstellationConfig &c : constellations)
     {
         for (uint32_t i = c.orbitStart; i < c.orbitStart + c.orbitCount; ++i)
@@ -1571,7 +1807,14 @@ void SatelliteSim::updatePositions(double t)
             float u = (float)fmod((double)orb.u0 + (double)meanMot * t,
                                   glm::two_pi<double>());
             float cosU = cosf(u), sinU = sinf(u);
-            float cosR = cosf(orb.raan), sinR = sinf(orb.raan);
+
+            // alignTerminator: precess RAAN at the SSO rate (2π/year) from the
+            // initial RAAN set at epoch.  Inclination is the fixed J2-derived SSO
+            // value stored in orb.incl — it never changes, only the nodal angle drifts.
+            float liveRaan = orb.alignTerminator
+                ? (float)fmod((double)orb.raan + kSSOPrecRate * (t - simTimeAtInit), glm::two_pi<double>())
+                : orb.raan;
+            float cosR = cosf(liveRaan), sinR = sinf(liveRaan);
 
             // Satellite ECI position (Rz(RAAN) · Rx(incl) · perifocal).
             float ex = cosR * cosU - sinR * sinU * cosI;
@@ -1655,9 +1898,36 @@ void SatelliteSim::updatePositions(double t)
             satInputData[i].crossSection = sqrtf(type.crossSectionM2 / 10.0f);
             satInputData[i].w1 = type.secondary.weight;
             satInputData[i].diffuse = type.diffuse;
+            satInputData[i].mirrorFrac = type.mirrorFrac;
 
             if (el > -0.01f)
+            {
                 ++visibleCount;
+
+                // ── Steady-state apparent magnitude ───────────────────────────
+                // Mirrors the GPU formula (sat_flare.comp) using only the diffuse
+                // floor — no specular — giving the baseline brightness of the sat
+                // when not actively flaring.  Cheap: no powf/reflect, just dot+sqrt.
+                //
+                // We skip the full specular term here to avoid an extra ~10 float
+                // ops per satellite at 100k scale (~1 ms CPU budget risk).
+                // Flaring satellites are transiently brighter; the readout shows
+                // the floor so it changes smoothly rather than flickering.
+                float distFactor = kRefRange / std::max(range, kRefRange);
+                distFactor *= distFactor; // 1/r²
+                float crossSection = sqrtf(type.crossSectionM2 / 10.0f);
+                float t = glm::clamp((glm::dot(sunDirECI, up) + 0.05f) / 0.39f, 0.0f, 1.0f);
+                float dayBright = t * t;
+                // kMagDiffuseFloor: zero-diffuse types (Starlink) scatter faintly from
+                // structural body panels; prevents the readout from always showing "--".
+                float effectiveDiffuse = std::max(type.diffuse, kMagDiffuseFloor);
+                float baseFlare = effectiveDiffuse * distFactor * crossSection * kBrightnessScale / (1.0f + dayBright * kDaySuppression);
+                if (baseFlare > 1e-9f)
+                {
+                    float mag = kMagRef - 2.5f * log10f(baseFlare / kMagRefFlare);
+                    peakMagnitude = std::min(peakMagnitude, mag);
+                }
+            }
         }
     }
 }
