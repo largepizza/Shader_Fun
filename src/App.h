@@ -5,6 +5,7 @@
 #include "VulkanContext.h"
 #include "Simulation.h"
 #include "UIRenderer.h"
+#include "AudioSystem.h"
 
 class App {
 public:
@@ -19,6 +20,7 @@ private:
     VulkanContext            ctx;
     std::unique_ptr<Simulation> sim;
     UIRenderer               ui;
+    AudioSystem              audio;
     float                    scrollX  = 0.0f; // accumulated scroll for Clay
     float                    scrollY  = 0.0f;
 

@@ -133,6 +133,8 @@ private:
     // ── Per-frame CPU-side geometry ───────────────────────────────────────
     std::vector<UIVertex>  vertices;
     std::vector<uint32_t>  indices;
+    uint32_t               batchVertOffset = 0; // running write offset in vertBuf (in #vertices)
+    uint32_t               batchIdxOffset  = 0; // running write offset in idxBuf  (in #indices)
     float                  frameW = 800.0f, frameH = 600.0f;
 
     // ── Input tracking ────────────────────────────────────────────────────

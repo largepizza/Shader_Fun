@@ -46,24 +46,24 @@ enum class OrbitDistribution
 // isotropic diffuse floor (structural body scatter).
 struct SurfaceSpec
 {
-    AttitudeMode attitude;  // how the surface normal is oriented each frame
-    float        specExp;   // specular exponent (0 = Lambertian diffuse)
-    float        weight;    // contribution weight relative to primary (0 = disabled)
+    AttitudeMode attitude; // how the surface normal is oriented each frame
+    float specExp;         // specular exponent (0 = Lambertian diffuse)
+    float weight;          // contribution weight relative to primary (0 = disabled)
 };
 
 // ── Per-type satellite parameters (CPU-side, drives GpuSatInput fields) ───────
 struct SatelliteType
 {
-    const char*  name;
-    glm::vec3    baseColor;       // visual tint
-    float        crossSectionM2;  // total reflective area (m²); brightness ∝ sqrt(area/10)
-    SurfaceSpec  primary;         // always active (solar panels, antenna face, etc.)
-    SurfaceSpec  secondary;       // optional second surface — set weight=0 to disable
-    float        diffuse;         // isotropic Lambertian floor: always visible fraction [0,1]
-                                  // models structural body scatter; applied after litFactor
-    float        mirrorFrac;      // fraction of primary surface that is near-perfect mirror [0,1]
-                                  // adds ultra-narrow specular spike (MIRROR_BOOST×) on top of Phong lobe
-                                  // 0.0 = no mirror peak; 0.05 = Starlink; 0.15 = ISS solar panels
+    const char *name;
+    glm::vec3 baseColor;   // visual tint
+    float crossSectionM2;  // total reflective area (m²); brightness ∝ sqrt(area/10)
+    SurfaceSpec primary;   // always active (solar panels, antenna face, etc.)
+    SurfaceSpec secondary; // optional second surface — set weight=0 to disable
+    float diffuse;         // isotropic Lambertian floor: always visible fraction [0,1]
+                           // models structural body scatter; applied after litFactor
+    float mirrorFrac;      // fraction of primary surface that is near-perfect mirror [0,1]
+                           // adds ultra-narrow specular spike (MIRROR_BOOST×) on top of Phong lobe
+                           // 0.0 = no mirror peak; 0.05 = Starlink; 0.15 = ISS solar panels
 };
 
 // ── Constellation descriptor ───────────────────────────────────────────────────
@@ -79,10 +79,10 @@ struct ConstellationConfig
     uint32_t typeIdx; // index into satTypes[]
     bool enabled;     // visibility toggle (hot-swappable)
     OrbitDistribution distribution = OrbitDistribution::Walker;
-    float altJitterM = 0.0f;       // RandomShell: ±altitude jitter; Disk: ±per-satellite alt scatter
-    float raan = 0.0f;             // Disk: orbital plane RAAN (radians); ignored if alignTerminator
-    bool alignTerminator = false;  // Disk: derive incl+raan from sunDirECI at init time
-    int numRings = 1;              // Disk: number of concentric rings (1 = single ring)
+    float altJitterM = 0.0f;      // RandomShell: ±altitude jitter; Disk: ±per-satellite alt scatter
+    float raan = 0.0f;            // Disk: orbital plane RAAN (radians); ignored if alignTerminator
+    bool alignTerminator = false; // Disk: derive incl+raan from sunDirECI at init time
+    int numRings = 1;             // Disk: number of concentric rings (1 = single ring)
     float ringSpacingM = 0.0f;    // Disk: altitude step between consecutive rings (meters)
     // Populated by initConstellation():
     uint32_t orbitStart = 0; // first index into satOrbits[]
@@ -103,18 +103,18 @@ struct ConstellationConfig
 
 struct GpuSatInput
 {
-    glm::vec3 eciRelPos;    // observer-relative ECI position (meters)
-    float     range;        // distance (meters)
-    glm::vec3 surfN0;       // primary surface normal in ECI (attitude-dependent unit vector)
-    float     elevation;    // elevation above local horizon (radians), pre-computed on CPU
-    glm::vec3 surfN1;       // secondary surface normal in ECI (radiators, body, etc.)
-    float     specExp0;     // primary surface specular exponent (0 = Lambertian)
-    glm::vec3 baseColor;    // satellite tint from SatelliteType
-    float     specExp1;     // secondary surface specular exponent (0 = Lambertian)
-    float     crossSection; // sqrt(crossSectionM2 / 10.0): area brightness scale (~1 = 10 m²)
-    float     w1;           // secondary surface weight relative to primary (0 = disabled)
-    float     diffuse;      // isotropic Lambertian floor — structural body scatter [0,1]
-    float     mirrorFrac;   // fraction of primary surface that is near-perfect mirror [0,1]
+    glm::vec3 eciRelPos; // observer-relative ECI position (meters)
+    float range;         // distance (meters)
+    glm::vec3 surfN0;    // primary surface normal in ECI (attitude-dependent unit vector)
+    float elevation;     // elevation above local horizon (radians), pre-computed on CPU
+    glm::vec3 surfN1;    // secondary surface normal in ECI (radiators, body, etc.)
+    float specExp0;      // primary surface specular exponent (0 = Lambertian)
+    glm::vec3 baseColor; // satellite tint from SatelliteType
+    float specExp1;      // secondary surface specular exponent (0 = Lambertian)
+    float crossSection;  // sqrt(crossSectionM2 / 10.0): area brightness scale (~1 = 10 m²)
+    float w1;            // secondary surface weight relative to primary (0 = disabled)
+    float diffuse;       // isotropic Lambertian floor — structural body scatter [0,1]
+    float mirrorFrac;    // fraction of primary surface that is near-perfect mirror [0,1]
 };
 static_assert(sizeof(GpuSatInput) == 80, "GpuSatInput layout mismatch");
 
@@ -158,14 +158,24 @@ static_assert(sizeof(SatFlarePC) == 80, "SatFlarePC layout mismatch");
 //   total: 112 bytes
 struct SatDrawPC
 {
-    glm::mat4 skyView;    // ENU → camera space
-    float fovYRad;        // vertical field of view (radians)
-    float aspect;         // viewport width / height
-    float pad[2];         // pad to 16-byte boundary before sunDirENU
-    glm::vec4 sunDirENU;  // sun direction in ENU (xyz unit vec, w = sin(elevation))
-    glm::vec4 moonDirENU; // moon direction in ENU (xyz unit vec, w = illuminated fraction)
+    glm::mat4 skyView;     // ENU → camera space
+    float fovYRad;         // vertical field of view (radians)
+    float aspect;          // viewport width / height
+    float pad[2];          // pad to 16-byte boundary before sunDirENU
+    glm::vec4 sunDirENU;   // sun direction in ENU (xyz unit vec, w = sin(elevation))
+    glm::vec4 moonDirENU;  // moon direction in ENU (xyz unit vec, w = illuminated fraction)
 }; // total: 112 bytes
 static_assert(sizeof(SatDrawPC) == 112, "SatDrawPC layout mismatch");
+
+// Per-frame satellite sky glow: top-N brightest flares written to a small SSBO.
+// std430 layout: int count + 3-float pad + 16 × vec4 (xyz=ENU dir, w=effectFlare).
+static constexpr int kMaxGlows = 16;
+struct GpuGlowBuf
+{
+    int32_t   count;
+    float     pad[3];
+    glm::vec4 entries[kMaxGlows]; // xyz = ENU unit dir, w = effectFlare intensity
+};
 
 // ── Sky camera ────────────────────────────────────────────────────────────────
 // Azimuth/elevation look direction in the local ENU frame.
@@ -241,6 +251,7 @@ public:
     void recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float dt) override;
     void recordDraw(VkCommandBuffer cmd, VulkanContext &ctx, float dt) override;
     void buildUI(float dt, UIRenderer &ui) override;
+    void setAudio(AudioSystem *audio) override;
     VkClearValue clearColor() const override { return {{{0.0f, 0.0f, 0.015f, 1.0f}}}; }
     void cleanup(VkDevice device) override;
     void onKey(GLFWwindow *w, int key, int action) override;
@@ -268,16 +279,16 @@ private:
     VkPipeline drawPipeline = VK_NULL_HANDLE;
 
     // Moon state (updated each frame in updatePositions)
-    glm::vec3 moonDirECI{1, 0, 0}; // unit vector toward moon in ECI (equatorial orbit)
+    glm::vec3 moonDirECI{1, 0, 0};    // unit vector toward moon in ECI (equatorial orbit)
     glm::vec4 moonDirENU{0, 1, 0, 0}; // xyz = moon dir in ENU, w = illuminated fraction
 
     // ── Stars ─────────────────────────────────────────────────────────────────
     struct StarRecord
     {
-        glm::vec3 eciDir;      // unit vector toward star in ECI (J2000)
-        float rawIntensity;    // magnitude-derived brightness (no night factor)
-        glm::vec3 color;       // spectral color from B-V index
-        float angSize;         // point sprite size in pixels
+        glm::vec3 eciDir;   // unit vector toward star in ECI (J2000)
+        float rawIntensity; // magnitude-derived brightness (no night factor)
+        glm::vec3 color;    // spectral color from B-V index
+        float angSize;      // point sprite size in pixels
     };
     std::vector<StarRecord> starRecords;
     VkBuffer starBuf = VK_NULL_HANDLE;
@@ -292,35 +303,54 @@ private:
 
     // ── Simulation state ──────────────────────────────────────────────────────
     SkyCamera camera;
-    double simTime      = 0.0;
+    double simTime = 0.0;
     double simTimeAtInit = 0.0;
-    int    timeScaleIdx = 1;
-    bool   timePaused   = false;
-    float  timeDir      = 1.0f;  // +1 = forward, -1 = reverse
+    int timeScaleIdx = 1;
+    bool timePaused = false;
+    float timeDir = 1.0f; // +1 = forward, -1 = reverse
     // Observer position/facing in Earth-fixed ECEF — canonical movement state.
     // obsLatDeg / obsLonDeg are display caches derived each frame; camera.azDeg is also derived.
     // Initial: lat=37°N lon=0°, facing north.
     //   obsDir    = (cos37°, 0, sin37°)       ≈ (0.7986, 0, 0.6018)
     //   obsFacing = north at that pos          ≈ (-0.6018, 0, 0.7986)
-    glm::vec3 obsDir    = { 0.7986f,  0.0f, 0.6018f }; // unit position vector
-    glm::vec3 obsFacing = {-0.6018f,  0.0f, 0.7986f }; // unit tangent (forward direction)
-    float  obsLatDeg    = 37.0f; // display cache — derived from obsDir
-    float  obsLonDeg    =  0.0f; // display cache — derived from obsDir
+    glm::vec3 obsDir = {0.7986f, 0.0f, 0.6018f};     // unit position vector
+    glm::vec3 obsFacing = {-0.6018f, 0.0f, 0.7986f}; // unit tangent (forward direction)
+    float obsLatDeg = 37.0f;                         // display cache — derived from obsDir
+    float obsLonDeg = 0.0f;                          // display cache — derived from obsDir
     uint32_t activeSatCount = 0;
-    uint32_t visibleCount   = 0;
-    float    peakMagnitude  = 99.0f; // brightest steady-state sat visible this frame (lower = brighter)
+    uint32_t visibleCount = 0;
+    float peakMagnitude = 99.0f; // brightest steady-state sat magnitude this frame
+
+    // ── Sky glow: top-N brightest flares ──────────────────────────────────────
+    // Collected by updatePositions(); uploaded to glowBuf each frame.
+    // The sky shader sums Gaussian contributions from all N entries.
+    glm::vec4 glowEntries[kMaxGlows]{};   // xyz = ENU unit dir, w = effectFlare
+    int       glowEntryCount = 0;
+    float     glowMinIntensity = 0.0f;    // min intensity in glowEntries (for efficient replacement)
+    VkBuffer       glowBuf    = VK_NULL_HANDLE;
+    VkDeviceMemory glowMem    = VK_NULL_HANDLE;
+    void*          glowMapped = nullptr;
+    VkDescriptorSetLayout skyDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool      skyDescPool   = VK_NULL_HANDLE;
+    VkDescriptorSet       skyDescSet    = VK_NULL_HANDLE;
 
     // ── UI visibility & settings ──────────────────────────────────────────────
-    bool uiVisible    = true;
+    bool uiVisible = true;
     bool settingsOpen = false;
-    bool iconsLoaded  = false;
-    VulkanContext* ctx_ = nullptr; // set in init(), used for lazy icon loading
+    bool iconsLoaded = false;
+    float uiScale    = 1.5f;          // text/UI size multiplier (0.75 – 2.0)
+    float masterVol_ = 0.8f;          // mirrors AudioSystem default (display fallback)
+    float musicVol_  = 0.6f;
+    float sfxVol_    = 1.0f;
+    VulkanContext *ctx_   = nullptr;  // set in init(), used for lazy icon loading
+    AudioSystem   *audio_ = nullptr;  // set via setAudio(), used in buildUI()
 
     // ── Key bindings (editable in the settings window) ────────────────────────
-    struct KeyBinding {
-        const char* action;
-        int         key;
-        bool        listening = false;
+    struct KeyBinding
+    {
+        const char *action;
+        int key;
+        bool listening = false;
     };
     std::vector<KeyBinding> keybindings;
 
@@ -350,19 +380,28 @@ private:
     float dmx = 0, dmy = 0; // accumulated delta for this frame
 
     // ── UI hover state (one-frame lag) ────────────────────────────────────────
-    bool hovConst[10]     = {};
-    bool hovTimeSlower    = false;
-    bool hovTimePause     = false;
-    bool hovTimeFaster    = false;
-    bool hovLatSouth      = false;
-    bool hovLatNorth      = false;
-    bool hovSettings      = false;
+    bool hovConst[10] = {};
+    bool hovTimeSlower = false;
+    bool hovTimePause = false;
+    bool hovTimeFaster = false;
+    bool hovLatSouth = false;
+    bool hovLatNorth = false;
+    bool hovSettings = false;
     bool hovSettingsClose = false;
-    bool hovRebind[8]     = {}; // per keybinding row
+    bool hovScaleMinus      = false;
+    bool hovScalePlus       = false;
+    bool hovMasterVolMinus  = false;
+    bool hovMasterVolPlus   = false;
+    bool hovMusicVolMinus   = false;
+    bool hovMusicVolPlus    = false;
+    bool hovSfxVolMinus     = false;
+    bool hovSfxVolPlus      = false;
+    bool hovRebind[8]       = {}; // per keybinding row
 
     // ── Private helpers ───────────────────────────────────────────────────────
     void createBuffers(VulkanContext &ctx);
     void createDescriptors(VulkanContext &ctx);
+    void createGlowResources(VulkanContext &ctx);
     void createComputePipeline(VulkanContext &ctx);
     void createSkyBgPipeline(VulkanContext &ctx);
     void createDrawPipeline(VulkanContext &ctx);

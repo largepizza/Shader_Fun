@@ -57,9 +57,19 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
+# miniaudio — single-header audio engine (MIT). Provides MP3/WAV/FLAC decoding
+# and OS audio output with no external dependencies.
+FetchContent_Declare(
+    miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(miniaudio)
+
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 add_executable(ShaderFun ${SOURCES})
-target_include_directories(ShaderFun PRIVATE src ${clay_SOURCE_DIR} ${stb_SOURCE_DIR})
+target_include_directories(ShaderFun PRIVATE src ${clay_SOURCE_DIR} ${stb_SOURCE_DIR} ${miniaudio_SOURCE_DIR})
 target_link_libraries(ShaderFun PRIVATE Vulkan::Vulkan glfw glm::glm)
 
 # Shader compilation

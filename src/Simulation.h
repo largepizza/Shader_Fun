@@ -3,7 +3,8 @@
 #include <GLFW/glfw3.h>
 #include "VulkanContext.h"
 
-class UIRenderer; // forward declare — simulations include UIRenderer.h in their .cpp
+class UIRenderer;   // forward declare — simulations include UIRenderer.h in their .cpp
+class AudioSystem;  // forward declare — simulations include AudioSystem.h in their .cpp
 
 // Abstract base class for all simulations.
 // To add a new simulation:
@@ -49,6 +50,11 @@ public:
     // Optional input handlers — default implementations do nothing.
     virtual void onKey(GLFWwindow* window, int key, int action) {}
     virtual void onCursorPos(GLFWwindow* window, double x, double y) {}
+
+    // Called by App after both the simulation and AudioSystem are initialised.
+    // Override to configure the playlist and store the pointer for use in buildUI.
+    // Default: no-op (simulations without audio ignore this).
+    virtual void setAudio(AudioSystem* /*audio*/) {}
 
     // Window title shown while this simulation runs
     virtual const char* name() const { return "ShaderFun"; }

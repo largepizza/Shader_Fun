@@ -40,6 +40,13 @@ ui.record(cmd)          → Clay → Vulkan quads/text on top of scene
 vkCmdEndRenderPass      → owned by App
 ```
 
+### Existing Simulations
+- `GameOfLife` — Conway's Game of Life via compute shader
+- `Particles` — GPU particle system with compute update
+- `Scene3DDemo` — 3D mesh + SDF rendering
+- `StarCatalog` — star catalog renderer (precursor to SatelliteSim)
+- `SatelliteSim` — satellite constellation flare visualizer (active dev branch `sat_sim_v1`)
+
 ### Simulation Interface (`Simulation.h`)
 To add a new simulation: create `src/simulations/MyFoo.h/.cpp`, inherit from `Simulation`, implement the pure virtuals, add one line to `main.cpp`. CMake picks up the `.cpp` automatically.
 
@@ -125,6 +132,10 @@ Each `SatelliteType` composes up to two reflective surfaces plus an isotropic di
 // Walker:
 { name, altM, incl, numPlanes, perPlane, typeIdx, enabled, OrbitDistribution::Walker }
 //   total sats = numPlanes × perPlane
+
+// RandomShell:
+{ name, altM, incl, numPlanes, perPlane, typeIdx, enabled, OrbitDistribution::RandomShell }
+//   total sats = numPlanes × perPlane, randomly distributed with random RAAN, incl in [0, incl]
 
 // Disk (extra trailing args):
 { name, altM, incl, numPlanes, perPlane, typeIdx, enabled, OrbitDistribution::Disk,

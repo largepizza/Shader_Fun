@@ -8,10 +8,13 @@ void App::run() {
     initWindow();
     ctx.init(window);
     sim->init(ctx);
+    audio.init();
+    sim->setAudio(&audio);  // let the simulation configure its playlist
     ui.init(ctx);
     mainLoop();
     // Wait for GPU idle before tearing down
     vkDeviceWaitIdle(ctx.device);
+    audio.cleanup();
     ui.cleanup(ctx.device);
     sim->cleanup(ctx.device);
     ctx.cleanup();
@@ -71,6 +74,9 @@ void App::drawFrame() {
                   (float)mx, (float)my, lmb, rmb,
                   scrollX, scrollY, dt);
     scrollX = scrollY = 0.0f; // consumed
+
+    // Advance music playlist (detects track end, starts next track).
+    audio.update(dt);
 
     // Let the simulation declare its UI elements and read input state via ui.
     sim->buildUI(dt, ui);

@@ -1,5 +1,6 @@
 #include "SatelliteSim.h"
 #include "../UIRenderer.h"
+#include "../AudioSystem.h"
 #include "clay.h"
 #include "star_catalog.h"
 
@@ -17,9 +18,9 @@ static constexpr double kOmegaEarth = 7.2921150e-5; // sidereal rotation rate (r
 static constexpr float kObsLatDefault = 37.0f;      // default observer latitude (°N, ~Bay Area)
 
 // ── Orbital mechanics ─────────────────────────────────────────────────────────
-static constexpr double kGM       = 3.986004418e14; // Earth gravitational parameter (m³/s²)
-static constexpr double kJ2       = 1.08263e-3;     // Earth oblateness (J2) coefficient
-static constexpr double kYearSec  = 365.25 * 86400.0; // seconds per tropical year
+static constexpr double kGM = 3.986004418e14;        // Earth gravitational parameter (m³/s²)
+static constexpr double kJ2 = 1.08263e-3;            // Earth oblateness (J2) coefficient
+static constexpr double kYearSec = 365.25 * 86400.0; // seconds per tropical year
 // SSO nodal precession rate = Earth's mean orbital motion ≈ 0.9856°/day eastward.
 // J2 causes a retrograde circular orbit (i > 90°) to precess its RAAN eastward at
 // exactly this rate, keeping the nodal plane fixed relative to the sun.
@@ -44,6 +45,35 @@ static inline float computeMeanMotion(float altM)
     return (float)sqrt(kGM / (a * a * a)); // rad/s
 }
 
+// SSO inclination from J2 nodal precession: solves dΩ/dt = kSSOPrecRate.
+// dΩ/dt = -1.5 * n * J2 * (Re/a)² * cos(i)   →   cos(i) = -kSSOPrecRate / (1.5*n*J2*(Re/a)²)
+// Result is in the retrograde range (~97–107° for typical LEO/MEO SSO altitudes).
+static inline float computeSSOInclination(float altM)
+{
+    double a = (double)kEarthRadius + (double)altM;
+    double n = sqrt(kGM / (a * a * a));
+    double rat = (double)kEarthRadius / a;
+    double cosI = -kSSOPrecRate / (1.5 * n * kJ2 * rat * rat);
+    return (float)acos(glm::clamp(cosI, -1.0, 1.0));
+}
+
+// Sun direction in ECI at J2000.0 (2000-01-01 12:00 TT), using the same
+// low-accuracy Astronomical Almanac formula as updatePositions() at t=0.
+// This is a fixed reference used to anchor the SSO epoch RAAN.
+static glm::vec3 sunDirECIAtJ2000()
+{
+    constexpr double L = 280.46;   // mean longitude at J2000 (degrees)
+    constexpr double g = 357.528;  // mean anomaly at J2000 (degrees)
+    constexpr double eps = 23.439; // obliquity at J2000 (degrees)
+    const double pi180 = glm::pi<double>() / 180.0;
+    const double gR = g * pi180;
+    const double lamR = (L + 1.915 * sin(gR) + 0.020 * sin(2.0 * gR)) * pi180;
+    const double epsR = eps * pi180;
+    return glm::normalize(glm::vec3{float(cos(lamR)),
+                                    float(sin(lamR) * cos(epsR)),
+                                    float(sin(lamR) * sin(epsR))});
+}
+
 // ─── init ─────────────────────────────────────────────────────────────────────
 void SatelliteSim::init(VulkanContext &ctx)
 {
@@ -51,6 +81,7 @@ void SatelliteSim::init(VulkanContext &ctx)
     // J2000.0 = 2000-01-01 12:00:00 UTC = Unix timestamp 946728000.
     {
         auto now = std::chrono::system_clock::now();
+        auto summer_solstice_2024 = std::chrono::system_clock::from_time_t(1714065600); // 2024-06-25 00:00:00 UTC
         auto j2000 = std::chrono::system_clock::from_time_t(946728000);
         simTime = std::chrono::duration<double>(now - j2000).count();
         simTimeAtInit = simTime;
@@ -68,6 +99,7 @@ void SatelliteSim::init(VulkanContext &ctx)
 
     createBuffers(ctx);
     createDescriptors(ctx);
+    createGlowResources(ctx);
     createComputePipeline(ctx);
     createSkyBgPipeline(ctx);
     createDrawPipeline(ctx);
@@ -133,6 +165,14 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
     updatePositions(simTime);
     updateStars();
 
+    // Upload top-N glow entries to the sky shader's SSBO.
+    {
+        GpuGlowBuf* gb = static_cast<GpuGlowBuf*>(glowMapped);
+        gb->count = glowEntryCount;
+        for (int gi = 0; gi < glowEntryCount; ++gi)
+            gb->entries[gi] = glowEntries[gi];
+    }
+
     if (activeSatCount == 0)
         return;
 
@@ -187,6 +227,8 @@ void SatelliteSim::recordDraw(VkCommandBuffer cmd, VulkanContext &ctx, float /*d
 
     // ── Pass 1: sky/ground background (fullscreen triangle, opaque) ──────────
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyBgPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            skyBgPipeLayout, 0, 1, &skyDescSet, 0, nullptr);
     vkCmdPushConstants(cmd, skyBgPipeLayout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(pc), &pc);
@@ -293,6 +335,25 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
 
     const UIInput &inp = ui.input();
 
+    // ── Font-size helper: scales base pixel size by uiScale ───────────────────
+    auto fs = [&](int base) -> uint16_t
+    {
+        return (uint16_t)std::max(8, (int)(base * uiScale + 0.5f));
+    };
+
+    // ── Audio helpers: rollover fires on hover transition, click on LMB press ─
+    // Both are no-ops when audio_ is null (audio init failed or not yet set).
+    auto sndRollover = [&](bool nowHov, bool prevHov)
+    {
+        if (audio_ && nowHov && !prevHov)
+            audio_->playSfx("assets/sound/ui/buttonrollover.wav");
+    };
+    auto sndClick = [&](bool nowHov)
+    {
+        if (audio_ && nowHov && inp.lmbPressed)
+            audio_->playSfx("assets/sound/ui/buttonclick.wav");
+    };
+
     // ── Lazy icon loading (first buildUI call after init) ─────────────────────
     if (!iconsLoaded && ctx_)
     {
@@ -331,237 +392,39 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
             snprintf(timeBuf, sizeof(timeBuf), "UTC --");
     }
 
-    // ── Info panel (top-left) ─────────────────────────────────────────────────
-    CLAY(CLAY_ID("SatInfoPanel"), {.layout = {
-                                       .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
-                                       .padding = {12, 12, 10, 10},
-                                       .childGap = 5,
-                                       .layoutDirection = CLAY_TOP_TO_BOTTOM},
-                                   .backgroundColor = {8, 10, 20, 210},
-                                   .cornerRadius = CLAY_CORNER_RADIUS(6),
-                                   .floating = {.offset = {12, 12}, .zIndex = 5, .attachTo = CLAY_ATTACH_TO_ROOT}})
+    // ── Status bar data (bottom-right toolbar) ────────────────────────────────
+    // setLat: moves the observer to a new latitude while preserving longitude direction
+    // and parallel-transporting obsFacing so it stays tangent after the position jump.
+    auto setLat = [this](float newLatDeg)
     {
-        CLAY_TEXT(CLAY_STRING("Satellite Constellation"),
-                  CLAY_TEXT_CONFIG({.textColor = {200, 220, 255, 255}, .fontSize = 18}));
-
-        Clay_String timeStr{false, (int32_t)strlen(timeBuf), timeBuf};
-        CLAY_TEXT(timeStr,
-                  CLAY_TEXT_CONFIG({.textColor = {160, 200, 160, 220}, .fontSize = 13}));
-
-        static char visBuf[48];
-        snprintf(visBuf, sizeof(visBuf), "%u / %u satellites visible",
-                 visibleCount, activeSatCount);
-        Clay_String visStr{false, (int32_t)strlen(visBuf), visBuf};
-        CLAY_TEXT(visStr,
-                  CLAY_TEXT_CONFIG({.textColor = {140, 170, 220, 220}, .fontSize = 13}));
-
-        // Brightest visible satellite (steady-state, no specular flare).
-        // Formula: effectFlare = diffuse × (500km/range)² × crossSection × BRIGHTNESS_SCALE
-        //          magnitude   = 6.0 − 2.5 × log₁₀(effectFlare / 0.008)
-        // 99.0 = no satellites visible above horizon (or all in daylight).
-        static char magBuf[40];
-        if (peakMagnitude < 90.0f)
-            snprintf(magBuf, sizeof(magBuf), "Peak mag  %.1f  (steady state)", peakMagnitude);
+        newLatDeg = glm::clamp(newLatDeg, -90.0f, 90.0f);
+        float sinL = sinf(glm::radians(newLatDeg));
+        float cosL = cosf(glm::radians(newLatDeg));
+        glm::vec2 xy = glm::vec2(obsDir.x, obsDir.y);
+        float xyMag = glm::length(xy);
+        if (xyMag > 1e-6f)
+            xy /= xyMag;
         else
-            snprintf(magBuf, sizeof(magBuf), "Peak mag  --");
-        Clay_String magStr{false, (int32_t)strlen(magBuf), magBuf};
-        CLAY_TEXT(magStr,
-                  CLAY_TEXT_CONFIG({.textColor = {160, 200, 160, 200}, .fontSize = 13}));
+            xy = {1.0f, 0.0f};
+        obsDir = {xy.x * cosL, xy.y * cosL, sinL};
+        obsFacing = glm::normalize(obsFacing - glm::dot(obsFacing, obsDir) * obsDir);
+        obsLatDeg = newLatDeg;
+        obsLonDeg = glm::degrees(atan2f(obsDir.y, obsDir.x));
+    };
 
-        static char sunBuf[32];
-        float sunElDeg = glm::degrees(asinf(glm::clamp(sunDirENU.w, -1.0f, 1.0f)));
-        snprintf(sunBuf, sizeof(sunBuf), "Sun elev  %.1f°", sunElDeg);
-        Clay_Color sunCol = sunElDeg > 0.0f
-                                ? Clay_Color{255, 220, 100, 220}
-                                : Clay_Color{100, 100, 140, 180};
-        Clay_String sunStr{false, (int32_t)strlen(sunBuf), sunBuf};
-        CLAY_TEXT(sunStr, CLAY_TEXT_CONFIG({.textColor = sunCol, .fontSize = 13}));
-
-        Clay_Color camCol = camera.captured
-                                ? Clay_Color{100, 255, 120, 255}
-                                : Clay_Color{160, 160, 190, 220};
-        CLAY_TEXT(camera.captured
-                      ? CLAY_STRING("Camera: CAPTURED  (RMB to release)")
-                      : CLAY_STRING("Camera: free  (Right-click to capture)"),
-                  CLAY_TEXT_CONFIG({.textColor = camCol, .fontSize = 13}));
-
-        static char fpsBuf[24];
-        snprintf(fpsBuf, sizeof(fpsBuf), "%.0f fps", dt > 0.0f ? 1.0f / dt : 0.0f);
-        Clay_String fpsStr{false, (int32_t)strlen(fpsBuf), fpsBuf};
-        CLAY_TEXT(fpsStr,
-                  CLAY_TEXT_CONFIG({.textColor = {120, 180, 120, 200}, .fontSize = 12}));
-
-        // ── Observer position control ─────────────────────────────────────────
-        // Latitude:  [◄] [►] buttons (5°/step) or scroll wheel over the readout.
-        // Longitude: WASD moves in camera bearing (10°/s; Shift = 60°/s).
-        //            A/D = strafe, W/S = forward/back relative to look direction.
-        static char latBuf[20];
-        float absLat = fabsf(obsLatDeg);
-        snprintf(latBuf, sizeof(latBuf), "%.1f\xc2\xb0 %c", absLat, obsLatDeg >= 0.0f ? 'N' : 'S');
-        Clay_String latStr{false, (int32_t)strlen(latBuf), latBuf};
-
-        // Set latitude while keeping the current longitude direction stored in obsDir.xy,
-        // and parallel-transport obsFacing so it stays tangent after the position jump.
-        auto setLat = [this](float newLatDeg)
-        {
-            newLatDeg = glm::clamp(newLatDeg, -90.0f, 90.0f);
-            float sinL = sinf(glm::radians(newLatDeg));
-            float cosL = cosf(glm::radians(newLatDeg));
-            glm::vec2 xy = glm::vec2(obsDir.x, obsDir.y);
-            float xyMag = glm::length(xy);
-            if (xyMag > 1e-6f)
-                xy /= xyMag;
-            else
-                xy = {1.0f, 0.0f};
-            obsDir = {xy.x * cosL, xy.y * cosL, sinL};
-            obsFacing = glm::normalize(obsFacing - glm::dot(obsFacing, obsDir) * obsDir);
-            obsLatDeg = newLatDeg;
-            obsLonDeg = glm::degrees(atan2f(obsDir.y, obsDir.x));
-        };
-
-        const int kLatBtnSz = 22;
-        const int kLatIconSz = 14;
-        CLAY(CLAY_ID("LatRow"), {.layout = {
-                                     .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
-                                     .childGap = 4,
-                                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                                     .layoutDirection = CLAY_LEFT_TO_RIGHT}})
-        {
-            CLAY_TEXT(CLAY_STRING("Lat"),
-                      CLAY_TEXT_CONFIG({.textColor = {140, 150, 180, 200}, .fontSize = 13}));
-
-            // South (−) button
-            Clay_Color sBg = hovLatSouth ? Clay_Color{60, 60, 110, 230} : Clay_Color{28, 28, 52, 210};
-            CLAY(CLAY_ID("LatSBtn"), {.layout = {
-                                          .sizing = {CLAY_SIZING_FIXED(kLatBtnSz), CLAY_SIZING_FIXED(kLatBtnSz)},
-                                          .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
-                                      .backgroundColor = sBg,
-                                      .cornerRadius = CLAY_CORNER_RADIUS(3)})
-            {
-                hovLatSouth = Clay_Hovered();
-                if (hovLatSouth && inp.lmbPressed)
-                    setLat(obsLatDeg - 5.0f);
-                CLAY(CLAY_ID("LatSIcon"), {.layout = {.sizing = {CLAY_SIZING_FIXED(kLatIconSz), CLAY_SIZING_FIXED(kLatIconSz)}},
-                                           .image = {.imageData = (void *)(intptr_t)kIconAngleLeft}}) {}
-            }
-
-            // Latitude readout — scroll wheel adjusts by 5° per notch
-            CLAY(CLAY_ID("LatDisplay"), {.layout = {
-                                             .sizing = {CLAY_SIZING_FIXED(68), CLAY_SIZING_FIT(0)},
-                                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
-            {
-                if (Clay_Hovered() && inp.scrollY != 0.0f)
-                    setLat(obsLatDeg + inp.scrollY * 5.0f);
-                CLAY_TEXT(latStr,
-                          CLAY_TEXT_CONFIG({.textColor = {210, 230, 190, 255}, .fontSize = 13}));
-            }
-
-            // North (+) button
-            Clay_Color nBg = hovLatNorth ? Clay_Color{60, 60, 110, 230} : Clay_Color{28, 28, 52, 210};
-            CLAY(CLAY_ID("LatNBtn"), {.layout = {
-                                          .sizing = {CLAY_SIZING_FIXED(kLatBtnSz), CLAY_SIZING_FIXED(kLatBtnSz)},
-                                          .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
-                                      .backgroundColor = nBg,
-                                      .cornerRadius = CLAY_CORNER_RADIUS(3)})
-            {
-                hovLatNorth = Clay_Hovered();
-                if (hovLatNorth && inp.lmbPressed)
-                    setLat(obsLatDeg + 5.0f);
-                CLAY(CLAY_ID("LatNIcon"), {.layout = {.sizing = {CLAY_SIZING_FIXED(kLatIconSz), CLAY_SIZING_FIXED(kLatIconSz)}},
-                                           .image = {.imageData = (void *)(intptr_t)kIconAngleRight}}) {}
-            }
-        }
-
-        // Longitude readout (WASD is the primary control — no buttons needed)
-        static char lonBuf[20];
-        float absLon = fabsf(obsLonDeg);
-        snprintf(lonBuf, sizeof(lonBuf), "%.1f\xc2\xb0 %c", absLon, obsLonDeg >= 0.0f ? 'E' : 'W');
-        CLAY(CLAY_ID("LonRow"), {.layout = {
-                                     .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
-                                     .childGap = 4,
-                                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                                     .layoutDirection = CLAY_LEFT_TO_RIGHT}})
-        {
-            CLAY_TEXT(CLAY_STRING("Lon"),
-                      CLAY_TEXT_CONFIG({.textColor = {140, 150, 180, 200}, .fontSize = 13}));
-            CLAY(CLAY_ID("LonSpacer"), {.layout = {.sizing = {CLAY_SIZING_FIXED(kLatBtnSz), CLAY_SIZING_FIT(0)}}}) {}
-            CLAY(CLAY_ID("LonDisplay"), {.layout = {
-                                             .sizing = {CLAY_SIZING_FIXED(68), CLAY_SIZING_FIT(0)},
-                                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
-            {
-                Clay_String lonStr{false, (int32_t)strlen(lonBuf), lonBuf};
-                CLAY_TEXT(lonStr,
-                          CLAY_TEXT_CONFIG({.textColor = {210, 230, 190, 255}, .fontSize = 13}));
-            }
-        }
-
-        CLAY_TEXT(CLAY_STRING("WASD move \xc2\xb7 Shift sprint"),
-                  CLAY_TEXT_CONFIG({.textColor = {100, 110, 140, 160}, .fontSize = 11}));
-    }
-
-    // ── Constellation toggles (top-right) ─────────────────────────────────────
-    CLAY(CLAY_ID("ConstellPanel"), {.layout = {
-                                        .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
-                                        .padding = {10, 10, 8, 8},
-                                        .childGap = 5,
-                                        .layoutDirection = CLAY_TOP_TO_BOTTOM},
-                                    .backgroundColor = {8, 10, 20, 210},
-                                    .cornerRadius = CLAY_CORNER_RADIUS(6),
-                                    .floating = {.offset = {inp.screenW - 195.0f, 12}, .zIndex = 5, .attachTo = CLAY_ATTACH_TO_ROOT}})
+    static char latBuf[20], lonBuf[20], statFpsBuf[24], statVisBuf[32];
     {
-        CLAY_TEXT(CLAY_STRING("Constellations"),
-                  CLAY_TEXT_CONFIG({.textColor = {200, 220, 255, 255}, .fontSize = 15}));
-
-        static char constCntBuf[10][16];
-
-        for (int ci = 0; ci < (int)constellations.size() && ci < 10; ++ci)
-        {
-            ConstellationConfig &c = constellations[ci];
-            snprintf(constCntBuf[ci], sizeof(constCntBuf[ci]), "%u", c.orbitCount);
-
-            Clay_Color rowBg = c.enabled
-                                   ? Clay_Color{20, 50, 90, 180}
-                                   : Clay_Color{20, 20, 35, 160};
-
-            CLAY(CLAY_IDI("ConstRow", ci), {.layout = {
-                                                .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
-                                                .padding = {4, 4, 3, 3},
-                                                .childGap = 6,
-                                                .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                                                .layoutDirection = CLAY_LEFT_TO_RIGHT},
-                                            .backgroundColor = rowBg,
-                                            .cornerRadius = CLAY_CORNER_RADIUS(3)})
-            {
-                Clay_Color btnBg = c.enabled
-                                       ? Clay_Color{30, 130, 60, 240}
-                                       : (hovConst[ci] ? Clay_Color{80, 40, 40, 230} : Clay_Color{55, 25, 25, 210});
-                CLAY(CLAY_IDI("ConstBtn", ci), {.layout = {
-                                                    .sizing = {CLAY_SIZING_FIXED(30), CLAY_SIZING_FIXED(18)},
-                                                    .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
-                                                .backgroundColor = btnBg,
-                                                .cornerRadius = CLAY_CORNER_RADIUS(3)})
-                {
-                    hovConst[ci] = Clay_Hovered();
-                    if (hovConst[ci] && inp.lmbPressed)
-                        c.enabled = !c.enabled;
-                    CLAY_TEXT(c.enabled ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
-                              CLAY_TEXT_CONFIG({.textColor = {220, 230, 255, 255}, .fontSize = 10}));
-                }
-
-                CLAY(CLAY_IDI("ConstName", ci), {.layout = {
-                                                     .sizing = {CLAY_SIZING_FIXED(100), CLAY_SIZING_FIT(0)}}})
-                {
-                    Clay_String nameStr{false, (int32_t)strlen(c.name), c.name};
-                    CLAY_TEXT(nameStr,
-                              CLAY_TEXT_CONFIG({.textColor = {180, 200, 240, 220}, .fontSize = 13}));
-                }
-
-                Clay_String cntStr{false, (int32_t)strlen(constCntBuf[ci]), constCntBuf[ci]};
-                CLAY_TEXT(cntStr,
-                          CLAY_TEXT_CONFIG({.textColor = {110, 130, 170, 180}, .fontSize = 11}));
-            }
-        }
+        float absLat = fabsf(obsLatDeg);
+        float absLon = fabsf(obsLonDeg);
+        snprintf(latBuf, sizeof(latBuf), "%.1f\xc2\xb0 %c", absLat, obsLatDeg >= 0.0f ? 'N' : 'S');
+        snprintf(lonBuf, sizeof(lonBuf), "%.1f\xc2\xb0 %c", absLon, obsLonDeg >= 0.0f ? 'E' : 'W');
+        snprintf(statFpsBuf, sizeof(statFpsBuf), "%.0f fps", dt > 0.0f ? 1.0f / dt : 0.0f);
+        snprintf(statVisBuf, sizeof(statVisBuf), "%u vis", visibleCount);
     }
+    Clay_String latStr{false, (int32_t)strlen(latBuf), latBuf};
+    Clay_String lonStr{false, (int32_t)strlen(lonBuf), lonBuf};
+    Clay_String statFpsStr{false, (int32_t)strlen(statFpsBuf), statFpsBuf};
+    Clay_String statVisStr{false, (int32_t)strlen(statVisBuf), statVisBuf};
 
     // ── Time controls (bottom-left) ───────────────────────────────────────────
     // Shows UTC time, a slow/pause|play/fast icon button row, speed label, and reverse indicator.
@@ -587,14 +450,14 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
         {
             Clay_String timeStr{false, (int32_t)strlen(timeBuf), timeBuf};
             CLAY_TEXT(timeStr,
-                      CLAY_TEXT_CONFIG({.textColor = {160, 200, 160, 220}, .fontSize = 12}));
+                      CLAY_TEXT_CONFIG({.textColor = {160, 200, 160, 220}, .fontSize = fs(12)}));
 
             // Speed / direction label
             Clay_Color speedCol = timePaused       ? Clay_Color{200, 100, 60, 220}
                                   : timeDir < 0.0f ? Clay_Color{180, 120, 255, 220}
                                                    : Clay_Color{120, 200, 255, 220};
             Clay_String speedStr{false, (int32_t)strlen(speedBuf), speedBuf};
-            CLAY_TEXT(speedStr, CLAY_TEXT_CONFIG({.textColor = speedCol, .fontSize = 12}));
+            CLAY_TEXT(speedStr, CLAY_TEXT_CONFIG({.textColor = speedCol, .fontSize = fs(12)}));
         }
 
         // Icon button row: [◀] [⏸/▶] [▶]
@@ -614,12 +477,17 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                             .backgroundColor = slowBg,
                                             .cornerRadius = CLAY_CORNER_RADIUS(4)})
             {
-                hovTimeSlower = Clay_Hovered();
+                {
+                    bool n = Clay_Hovered();
+                    sndRollover(n, hovTimeSlower);
+                    sndClick(n);
+                    hovTimeSlower = n;
+                }
                 if (hovTimeSlower && inp.lmbPressed)
                     timeScaleIdx = std::max(0, timeScaleIdx - 1);
                 CLAY(CLAY_ID("TimeSlowerIcon"), {.layout = {
                                                      .sizing = {CLAY_SIZING_FIXED(kIconSize), CLAY_SIZING_FIXED(kIconSize)}},
-                                                 .image = {.imageData = (void *)(intptr_t)kIconAngleLeft}}) {}
+                                                 .image = {.imageData = (void *)(intptr_t)(kIconAngleLeft + 1)}}) {}
             }
 
             // ── Pause / Play ──────────────────────────────────────────────────
@@ -632,13 +500,18 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                            .backgroundColor = pauseBg,
                                            .cornerRadius = CLAY_CORNER_RADIUS(4)})
             {
-                hovTimePause = Clay_Hovered();
+                {
+                    bool n = Clay_Hovered();
+                    sndRollover(n, hovTimePause);
+                    sndClick(n);
+                    hovTimePause = n;
+                }
                 if (hovTimePause && inp.lmbPressed)
                     timePaused = !timePaused;
                 int pauseIcon = timePaused ? kIconPlay : kIconPause;
                 CLAY(CLAY_ID("TimePauseIcon"), {.layout = {
                                                     .sizing = {CLAY_SIZING_FIXED(kIconSize), CLAY_SIZING_FIXED(kIconSize)}},
-                                                .image = {.imageData = (void *)(intptr_t)pauseIcon}}) {}
+                                                .image = {.imageData = (void *)(intptr_t)(pauseIcon + 1)}}) {}
             }
 
             // ── Speed up ──────────────────────────────────────────────────────
@@ -649,46 +522,154 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                             .backgroundColor = fastBg,
                                             .cornerRadius = CLAY_CORNER_RADIUS(4)})
             {
-                hovTimeFaster = Clay_Hovered();
+                {
+                    bool n = Clay_Hovered();
+                    sndRollover(n, hovTimeFaster);
+                    sndClick(n);
+                    hovTimeFaster = n;
+                }
                 if (hovTimeFaster && inp.lmbPressed)
                     timeScaleIdx = std::min(kNumTimeScales - 1, timeScaleIdx + 1);
                 CLAY(CLAY_ID("TimeFasterIcon"), {.layout = {
                                                      .sizing = {CLAY_SIZING_FIXED(kIconSize), CLAY_SIZING_FIXED(kIconSize)}},
-                                                 .image = {.imageData = (void *)(intptr_t)kIconAngleRight}}) {}
+                                                 .image = {.imageData = (void *)(intptr_t)(kIconAngleRight + 1)}}) {}
             }
         }
 
         // Hint text
         CLAY_TEXT(CLAY_STRING(",/. = speed  Space = pause  R = reverse  Tab = hide UI"),
-                  CLAY_TEXT_CONFIG({.textColor = {90, 90, 120, 160}, .fontSize = 10}));
+                  CLAY_TEXT_CONFIG({.textColor = {90, 90, 120, 160}, .fontSize = fs(10)}));
     }
 
-    // ── Settings icon (bottom-right) ──────────────────────────────────────────
-    const float kSettingsBtnSize = 36.0f;
-    const float kSettingsBtnX = inp.screenW - kSettingsBtnSize - 12.0f;
-    const float kSettingsBtnY = inp.screenH - kSettingsBtnSize - 12.0f;
-    Clay_Color settingsBg = hovSettings ? Clay_Color{60, 60, 100, 230} : Clay_Color{20, 20, 40, 180};
-
-    CLAY(CLAY_ID("SettingsBtn"), {.layout = {
-                                      .sizing = {CLAY_SIZING_FIXED(kSettingsBtnSize), CLAY_SIZING_FIXED(kSettingsBtnSize)},
-                                      .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
-                                  .backgroundColor = settingsBg,
-                                  .cornerRadius = CLAY_CORNER_RADIUS(6),
-                                  .floating = {.offset = {kSettingsBtnX, kSettingsBtnY}, .zIndex = 5, .attachTo = CLAY_ATTACH_TO_ROOT}})
+    // ── Status bar (bottom-right): lat/lon, fps, vis count, settings gear ────
     {
-        hovSettings = Clay_Hovered();
-        if (hovSettings && inp.lmbPressed)
-            settingsOpen = !settingsOpen;
-        CLAY(CLAY_ID("SettingsIcon"), {.layout = {
-                                           .sizing = {CLAY_SIZING_FIXED(22), CLAY_SIZING_FIXED(22)}},
-                                       .image = {.imageData = (void *)(intptr_t)kIconSettings}}) {}
+        const int kSBBtnSz = 22;
+        const int kSBIconSz = 14;
+        const int kGearSz = 28;
+        Clay_Color settingsBg = hovSettings ? Clay_Color{60, 60, 100, 230} : Clay_Color{20, 20, 40, 180};
+
+        CLAY(CLAY_ID("StatusBar"), {.layout = {
+                                        .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(38)},
+                                        .padding = {10, 10, 6, 6},
+                                        .childGap = 7,
+                                        .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                        .layoutDirection = CLAY_LEFT_TO_RIGHT},
+                                    .backgroundColor = {8, 10, 20, 210},
+                                    .cornerRadius = CLAY_CORNER_RADIUS(6),
+                                    .floating = {.offset = {-12.0f, -12.0f}, .zIndex = 5, .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_BOTTOM, .parent = CLAY_ATTACH_POINT_RIGHT_BOTTOM}, .attachTo = CLAY_ATTACH_TO_ROOT}})
+        {
+            // ── Lat south button ──────────────────────────────────────────────
+            Clay_Color sbSBg = hovLatSouth ? Clay_Color{60, 60, 110, 230} : Clay_Color{28, 28, 52, 210};
+            CLAY(CLAY_ID("SBLatSBtn"), {.layout = {
+                                            .sizing = {CLAY_SIZING_FIXED(kSBBtnSz), CLAY_SIZING_FIXED(kSBBtnSz)},
+                                            .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                        .backgroundColor = sbSBg,
+                                        .cornerRadius = CLAY_CORNER_RADIUS(3)})
+            {
+                {
+                    bool n = Clay_Hovered();
+                    sndRollover(n, hovLatSouth);
+                    sndClick(n);
+                    hovLatSouth = n;
+                }
+                if (hovLatSouth && inp.lmbPressed)
+                    setLat(obsLatDeg - 5.0f);
+                CLAY(CLAY_ID("SBLatSIcon"), {.layout = {.sizing = {CLAY_SIZING_FIXED(kSBIconSz), CLAY_SIZING_FIXED(kSBIconSz)}},
+                                             .image = {.imageData = (void *)(intptr_t)(kIconAngleLeft + 1)}}) {}
+            }
+
+            // ── Lat display (scroll to adjust) ────────────────────────────────
+            CLAY(CLAY_ID("SBLatDisplay"), {.layout = {
+                                               .sizing = {CLAY_SIZING_FIXED(62), CLAY_SIZING_FIT(0)},
+                                               .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
+            {
+                if (Clay_Hovered() && inp.scrollY != 0.0f)
+                    setLat(obsLatDeg + inp.scrollY * 5.0f);
+                CLAY_TEXT(latStr, CLAY_TEXT_CONFIG({.textColor = {210, 230, 190, 255}, .fontSize = fs(12)}));
+            }
+
+            // ── Lat north button ──────────────────────────────────────────────
+            Clay_Color sbNBg = hovLatNorth ? Clay_Color{60, 60, 110, 230} : Clay_Color{28, 28, 52, 210};
+            CLAY(CLAY_ID("SBLatNBtn"), {.layout = {
+                                            .sizing = {CLAY_SIZING_FIXED(kSBBtnSz), CLAY_SIZING_FIXED(kSBBtnSz)},
+                                            .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                        .backgroundColor = sbNBg,
+                                        .cornerRadius = CLAY_CORNER_RADIUS(3)})
+            {
+                {
+                    bool n = Clay_Hovered();
+                    sndRollover(n, hovLatNorth);
+                    sndClick(n);
+                    hovLatNorth = n;
+                }
+                if (hovLatNorth && inp.lmbPressed)
+                    setLat(obsLatDeg + 5.0f);
+                CLAY(CLAY_ID("SBLatNIcon"), {.layout = {.sizing = {CLAY_SIZING_FIXED(kSBIconSz), CLAY_SIZING_FIXED(kSBIconSz)}},
+                                             .image = {.imageData = (void *)(intptr_t)(kIconAngleRight + 1)}}) {}
+            }
+
+            CLAY(CLAY_ID("SBDiv1"), {.layout = {.sizing = {CLAY_SIZING_FIXED(1), CLAY_SIZING_FIXED(20)}},
+                                     .backgroundColor = {60, 70, 100, 120}}) {}
+
+            // ── Lon display ───────────────────────────────────────────────────
+            CLAY(CLAY_ID("SBLonDisplay"), {.layout = {
+                                               .sizing = {CLAY_SIZING_FIXED(62), CLAY_SIZING_FIT(0)},
+                                               .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
+            {
+                CLAY_TEXT(lonStr, CLAY_TEXT_CONFIG({.textColor = {210, 230, 190, 255}, .fontSize = fs(12)}));
+            }
+
+            CLAY(CLAY_ID("SBDiv2"), {.layout = {.sizing = {CLAY_SIZING_FIXED(1), CLAY_SIZING_FIXED(20)}},
+                                     .backgroundColor = {60, 70, 100, 120}}) {}
+
+            // ── FPS ───────────────────────────────────────────────────────────
+            CLAY(CLAY_ID("SBFps"), {.layout = {
+                                        .sizing = {CLAY_SIZING_FIXED(50), CLAY_SIZING_FIT(0)},
+                                        .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
+            {
+                CLAY_TEXT(statFpsStr, CLAY_TEXT_CONFIG({.textColor = {120, 180, 120, 200}, .fontSize = fs(12)}));
+            }
+
+            CLAY(CLAY_ID("SBDiv3"), {.layout = {.sizing = {CLAY_SIZING_FIXED(1), CLAY_SIZING_FIXED(20)}},
+                                     .backgroundColor = {60, 70, 100, 120}}) {}
+
+            // ── Visible sat count ─────────────────────────────────────────────
+            CLAY(CLAY_ID("SBVis"), {.layout = {
+                                        .sizing = {CLAY_SIZING_FIXED(60), CLAY_SIZING_FIT(0)},
+                                        .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
+            {
+                CLAY_TEXT(statVisStr, CLAY_TEXT_CONFIG({.textColor = {140, 170, 220, 220}, .fontSize = fs(12)}));
+            }
+
+            CLAY(CLAY_ID("SBDiv4"), {.layout = {.sizing = {CLAY_SIZING_FIXED(1), CLAY_SIZING_FIXED(20)}},
+                                     .backgroundColor = {60, 70, 100, 120}}) {}
+
+            // ── Settings gear button ──────────────────────────────────────────
+            CLAY(CLAY_ID("SettingsBtn"), {.layout = {
+                                              .sizing = {CLAY_SIZING_FIXED(kGearSz), CLAY_SIZING_FIXED(kGearSz)},
+                                              .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                          .backgroundColor = settingsBg,
+                                          .cornerRadius = CLAY_CORNER_RADIUS(4)})
+            {
+                {
+                    bool n = Clay_Hovered();
+                    sndRollover(n, hovSettings);
+                    sndClick(n);
+                    if (n && inp.lmbPressed)
+                        settingsOpen = !settingsOpen;
+                    hovSettings = n;
+                }
+                CLAY(CLAY_ID("SettingsIcon"), {.layout = {.sizing = {CLAY_SIZING_FIXED(18), CLAY_SIZING_FIXED(18)}},
+                                               .image = {.imageData = (void *)(intptr_t)(kIconSettings + 1)}}) {}
+            }
+        }
     }
 
     // ── Settings window ───────────────────────────────────────────────────────
     if (settingsOpen)
     {
-        const float kWinW = 400.0f;
-        const float kWinH = 440.0f;
+        const float kWinW = 500.0f;
+        const float kWinH = 500.0f;
         const float kWinX = (inp.screenW - kWinW) * 0.5f;
         const float kWinY = (inp.screenH - kWinH) * 0.5f;
 
@@ -712,7 +693,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                .cornerRadius = {8, 8, 0, 0}})
             {
                 CLAY_TEXT(CLAY_STRING("Settings"),
-                          CLAY_TEXT_CONFIG({.textColor = {200, 220, 255, 255}, .fontSize = 16}));
+                          CLAY_TEXT_CONFIG({.textColor = {200, 220, 255, 255}, .fontSize = fs(16)}));
 
                 // Spacer
                 CLAY(CLAY_ID("SettingsTitleSpacer"), {.layout = {
@@ -726,11 +707,16 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                    .backgroundColor = closeBg,
                                                    .cornerRadius = CLAY_CORNER_RADIUS(4)})
                 {
-                    hovSettingsClose = Clay_Hovered();
+                    {
+                        bool n = Clay_Hovered();
+                        sndRollover(n, hovSettingsClose);
+                        sndClick(n);
+                        hovSettingsClose = n;
+                    }
                     if (hovSettingsClose && inp.lmbPressed)
                         settingsOpen = false;
                     CLAY_TEXT(CLAY_STRING("X"),
-                              CLAY_TEXT_CONFIG({.textColor = {230, 200, 200, 255}, .fontSize = 12}));
+                              CLAY_TEXT_CONFIG({.textColor = {230, 200, 200, 255}, .fontSize = fs(12)}));
                 }
             }
 
@@ -742,8 +728,169 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                  .layoutDirection = CLAY_TOP_TO_BOTTOM},
                                              .clip = {.vertical = true, .childOffset = Clay_GetScrollOffset()}})
             {
+                // ── Constellations ────────────────────────────────────────────
+                CLAY_TEXT(CLAY_STRING("Constellations"),
+                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = fs(14)}));
+                CLAY(CLAY_ID("ConstSep"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                                      .padding = {0, 0, 4, 4}},
+                                           .backgroundColor = {40, 50, 80, 120}}) {}
+
+                static char constCntBuf[10][16];
+                for (int ci = 0; ci < (int)constellations.size() && ci < 10; ++ci)
+                {
+                    ConstellationConfig &c = constellations[ci];
+                    snprintf(constCntBuf[ci], sizeof(constCntBuf[ci]), "%u", c.orbitCount);
+
+                    Clay_Color rowBg = c.enabled
+                                           ? Clay_Color{20, 50, 90, 180}
+                                           : Clay_Color{20, 20, 35, 160};
+                    CLAY(CLAY_IDI("ConstRow", ci), {.layout = {
+                                                        .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(24)},
+                                                        .padding = {4, 4, 3, 3},
+                                                        .childGap = 6,
+                                                        .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                                        .layoutDirection = CLAY_LEFT_TO_RIGHT},
+                                                    .backgroundColor = rowBg,
+                                                    .cornerRadius = CLAY_CORNER_RADIUS(3)})
+                    {
+                        Clay_Color btnBg = c.enabled
+                                               ? Clay_Color{30, 130, 60, 240}
+                                               : (hovConst[ci] ? Clay_Color{80, 40, 40, 230} : Clay_Color{55, 25, 25, 210});
+                        CLAY(CLAY_IDI("ConstBtn", ci), {.layout = {
+                                                            .sizing = {CLAY_SIZING_FIXED(30), CLAY_SIZING_FIXED(18)},
+                                                            .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                        .backgroundColor = btnBg,
+                                                        .cornerRadius = CLAY_CORNER_RADIUS(3)})
+                        {
+                            {
+                                bool n = Clay_Hovered();
+                                sndRollover(n, hovConst[ci]);
+                                sndClick(n);
+                                hovConst[ci] = n;
+                            }
+                            if (hovConst[ci] && inp.lmbPressed)
+                                c.enabled = !c.enabled;
+                            CLAY_TEXT(c.enabled ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
+                                      CLAY_TEXT_CONFIG({.textColor = {220, 230, 255, 255}, .fontSize = fs(10)}));
+                        }
+                        CLAY(CLAY_IDI("ConstName", ci), {.layout = {.sizing = {CLAY_SIZING_FIXED(150), CLAY_SIZING_FIT(0)}}})
+                        {
+                            Clay_String nameStr{false, (int32_t)strlen(c.name), c.name};
+                            CLAY_TEXT(nameStr, CLAY_TEXT_CONFIG({.textColor = {180, 200, 240, 220}, .fontSize = fs(12)}));
+                        }
+                        Clay_String cntStr{false, (int32_t)strlen(constCntBuf[ci]), constCntBuf[ci]};
+                        CLAY_TEXT(cntStr, CLAY_TEXT_CONFIG({.textColor = {110, 130, 170, 180}, .fontSize = fs(11)}));
+                    }
+                }
+
+                // ── Sound ────────────────────────────────────────────────────
+                CLAY(CLAY_ID("SndTopSep"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                                       .padding = {0, 0, 6, 4}},
+                                            .backgroundColor = {40, 50, 80, 120}}) {}
+                CLAY_TEXT(CLAY_STRING("Sound"),
+                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = fs(14)}));
+                CLAY(CLAY_ID("SndSep"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                                    .padding = {0, 0, 4, 4}},
+                                         .backgroundColor = {40, 50, 80, 120}}) {}
+
+                // Helper: one volume row (label, spacer, −, value, +)
+                // We use a macro-like lambda to avoid copy-pasting Clay layout 3 times.
+                static char volBufs[3][8];
+                struct VolRow
+                {
+                    const char *label;
+                    float vol;
+                    bool &hMinus;
+                    bool &hPlus;
+                    const char *idMinus;
+                    const char *idPlus;
+                    const char *idVal;
+                    int bufIdx;
+                };
+                VolRow volRows[] = {
+                    {"Master vol", audio_ ? audio_->getMasterVolume() : masterVol_, hovMasterVolMinus, hovMasterVolPlus, "MasterVolMinus", "MasterVolPlus", "MasterVolVal", 0},
+                    {"Music vol", audio_ ? audio_->getMusicVolume() : musicVol_, hovMusicVolMinus, hovMusicVolPlus, "MusicVolMinus", "MusicVolPlus", "MusicVolVal", 1},
+                    {"SFX vol", audio_ ? audio_->getSfxVolume() : sfxVol_, hovSfxVolMinus, hovSfxVolPlus, "SfxVolMinus", "SfxVolPlus", "SfxVolVal", 2},
+                };
+                for (auto &vr : volRows)
+                {
+                    snprintf(volBufs[vr.bufIdx], sizeof(volBufs[0]), "%3.0f%%", vr.vol * 100.0f);
+                    Clay_String volStr{false, (int32_t)strlen(volBufs[vr.bufIdx]), volBufs[vr.bufIdx]};
+                    CLAY(CLAY_IDI("VolRow", vr.bufIdx), {.layout = {
+                                                             .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(26)},
+                                                             .padding = {4, 4, 2, 2},
+                                                             .childGap = 6,
+                                                             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                                             .layoutDirection = CLAY_LEFT_TO_RIGHT}})
+                    {
+                        CLAY(CLAY_IDI("VolLabel", vr.bufIdx), {.layout = {.sizing = {CLAY_SIZING_FIXED(76), CLAY_SIZING_FIT(0)}}})
+                        {
+                            Clay_String lblStr{false, (int32_t)strlen(vr.label), vr.label};
+                            CLAY_TEXT(lblStr, CLAY_TEXT_CONFIG({.textColor = {180, 200, 240, 220}, .fontSize = fs(12)}));
+                        }
+                        CLAY(CLAY_IDI("VolSpc", vr.bufIdx), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
+                        // − button
+                        Clay_Color cMinus = vr.hMinus ? Clay_Color{60, 70, 120, 220} : Clay_Color{28, 30, 55, 200};
+                        CLAY(CLAY_IDI("VolMinus", vr.bufIdx), {.layout = {
+                                                                   .sizing = {CLAY_SIZING_FIXED(20), CLAY_SIZING_FIXED(20)},
+                                                                   .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                               .backgroundColor = cMinus,
+                                                               .cornerRadius = CLAY_CORNER_RADIUS(3)})
+                        {
+                            bool n = Clay_Hovered();
+                            sndRollover(n, vr.hMinus);
+                            sndClick(n);
+                            vr.hMinus = n;
+                            if (vr.hMinus && inp.lmbPressed)
+                            {
+                                if (vr.bufIdx == 0 && audio_)
+                                    audio_->setMasterVolume(audio_->getMasterVolume() - 0.05f);
+                                else if (vr.bufIdx == 1 && audio_)
+                                    audio_->setMusicVolume(audio_->getMusicVolume() - 0.05f);
+                                else if (vr.bufIdx == 2 && audio_)
+                                    audio_->setSfxVolume(audio_->getSfxVolume() - 0.05f);
+                            }
+                            CLAY_TEXT(CLAY_STRING("-"), CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = fs(12)}));
+                        }
+                        // value
+                        CLAY(CLAY_IDI("VolVal", vr.bufIdx), {.layout = {
+                                                                 .sizing = {CLAY_SIZING_FIXED(38), CLAY_SIZING_FIT(0)},
+                                                                 .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
+                        {
+                            CLAY_TEXT(volStr, CLAY_TEXT_CONFIG({.textColor = {210, 230, 190, 255}, .fontSize = fs(12)}));
+                        }
+                        // + button
+                        Clay_Color cPlus = vr.hPlus ? Clay_Color{60, 70, 120, 220} : Clay_Color{28, 30, 55, 200};
+                        CLAY(CLAY_IDI("VolPlus", vr.bufIdx), {.layout = {
+                                                                  .sizing = {CLAY_SIZING_FIXED(20), CLAY_SIZING_FIXED(20)},
+                                                                  .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                              .backgroundColor = cPlus,
+                                                              .cornerRadius = CLAY_CORNER_RADIUS(3)})
+                        {
+                            bool n = Clay_Hovered();
+                            sndRollover(n, vr.hPlus);
+                            sndClick(n);
+                            vr.hPlus = n;
+                            if (vr.hPlus && inp.lmbPressed)
+                            {
+                                if (vr.bufIdx == 0 && audio_)
+                                    audio_->setMasterVolume(audio_->getMasterVolume() + 0.05f);
+                                else if (vr.bufIdx == 1 && audio_)
+                                    audio_->setMusicVolume(audio_->getMusicVolume() + 0.05f);
+                                else if (vr.bufIdx == 2 && audio_)
+                                    audio_->setSfxVolume(audio_->getSfxVolume() + 0.05f);
+                            }
+                            CLAY_TEXT(CLAY_STRING("+"), CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = fs(12)}));
+                        }
+                    }
+                }
+
+                // ── Controls ──────────────────────────────────────────────────
+                CLAY(CLAY_ID("SndCtrlSep"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                                        .padding = {0, 0, 6, 4}},
+                                             .backgroundColor = {40, 50, 80, 120}}) {}
                 CLAY_TEXT(CLAY_STRING("Controls"),
-                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = 14}));
+                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = fs(14)}));
 
                 // Thin separator
                 CLAY(CLAY_ID("CtrlSep"), {.layout = {
@@ -776,7 +923,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                         {
                             Clay_String actStr{false, (int32_t)strlen(kb.action), kb.action};
                             CLAY_TEXT(actStr,
-                                      CLAY_TEXT_CONFIG({.textColor = {180, 200, 240, 220}, .fontSize = 13}));
+                                      CLAY_TEXT_CONFIG({.textColor = {180, 200, 240, 220}, .fontSize = fs(13)}));
                         }
 
                         // Current key label (fixed width)
@@ -788,7 +935,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                     ? Clay_Color{255, 180, 60, 255}
                                                     : Clay_Color{140, 160, 200, 200};
                             CLAY_TEXT(keyStr,
-                                      CLAY_TEXT_CONFIG({.textColor = keyCol, .fontSize = 13}));
+                                      CLAY_TEXT_CONFIG({.textColor = keyCol, .fontSize = fs(13)}));
                         }
 
                         // Rebind button
@@ -801,7 +948,12 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                         .backgroundColor = rebindBg,
                                                         .cornerRadius = CLAY_CORNER_RADIUS(3)})
                         {
-                            hovRebind[ki] = Clay_Hovered();
+                            {
+                                bool n = Clay_Hovered();
+                                sndRollover(n, hovRebind[ki]);
+                                sndClick(n);
+                                hovRebind[ki] = n;
+                            }
                             if (hovRebind[ki] && inp.lmbPressed)
                             {
                                 // Cancel any other listening binding
@@ -810,7 +962,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                 kb.listening = true;
                             }
                             CLAY_TEXT(kb.listening ? CLAY_STRING("PRESS KEY") : CLAY_STRING("Rebind"),
-                                      CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = 10}));
+                                      CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = fs(10)}));
                         }
                     }
                 }
@@ -821,25 +973,108 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                  .padding = {0, 0, 6, 4}},
                                              .backgroundColor = {40, 50, 80, 120}}) {}
                 CLAY_TEXT(CLAY_STRING("Camera"),
-                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = 14}));
+                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = fs(14)}));
                 CLAY_TEXT(CLAY_STRING("Right-click drag   Look around"),
-                          CLAY_TEXT_CONFIG({.textColor = {110, 130, 160, 180}, .fontSize = 12}));
+                          CLAY_TEXT_CONFIG({.textColor = {110, 130, 160, 180}, .fontSize = fs(12)}));
                 CLAY_TEXT(CLAY_STRING("Scroll wheel        Zoom (FOV)"),
-                          CLAY_TEXT_CONFIG({.textColor = {110, 130, 160, 180}, .fontSize = 12}));
+                          CLAY_TEXT_CONFIG({.textColor = {110, 130, 160, 180}, .fontSize = fs(12)}));
+
+                // ── UI Scale ──────────────────────────────────────────────────
+                CLAY(CLAY_ID("UiScaleSep"), {.layout = {
+                                                 .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                                 .padding = {0, 0, 6, 4}},
+                                             .backgroundColor = {40, 50, 80, 120}}) {}
+                CLAY_TEXT(CLAY_STRING("Display"),
+                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = fs(14)}));
+
+                CLAY(CLAY_ID("UiScaleRow"), {.layout = {
+                                                 .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28)},
+                                                 .padding = {4, 4, 4, 4},
+                                                 .childGap = 8,
+                                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                                 .layoutDirection = CLAY_LEFT_TO_RIGHT}})
+                {
+                    CLAY_TEXT(CLAY_STRING("Text scale"),
+                              CLAY_TEXT_CONFIG({.textColor = {180, 200, 240, 220}, .fontSize = fs(13)}));
+
+                    // Spacer
+                    CLAY(CLAY_ID("UiScaleSpacer"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
+
+                    // − button
+                    Clay_Color scaleMinusBg = hovScaleMinus ? Clay_Color{60, 70, 120, 220} : Clay_Color{28, 30, 55, 200};
+                    CLAY(CLAY_ID("UiScaleMinus"), {.layout = {
+                                                       .sizing = {CLAY_SIZING_FIXED(22), CLAY_SIZING_FIXED(22)},
+                                                       .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                   .backgroundColor = scaleMinusBg,
+                                                   .cornerRadius = CLAY_CORNER_RADIUS(3)})
+                    {
+                        {
+                            bool n = Clay_Hovered();
+                            sndRollover(n, hovScaleMinus);
+                            sndClick(n);
+                            hovScaleMinus = n;
+                        }
+                        if (hovScaleMinus && inp.lmbPressed)
+                            uiScale = std::max(0.75f, uiScale - 0.125f);
+                        CLAY_TEXT(CLAY_STRING("-"), CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = fs(13)}));
+                    }
+
+                    // Scale readout
+                    static char scaleBuf[8];
+                    snprintf(scaleBuf, sizeof(scaleBuf), "%.2fx", uiScale);
+                    Clay_String scaleStr{false, (int32_t)strlen(scaleBuf), scaleBuf};
+                    CLAY(CLAY_ID("UiScaleVal"), {.layout = {
+                                                     .sizing = {CLAY_SIZING_FIXED(44), CLAY_SIZING_FIT(0)},
+                                                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
+                    {
+                        CLAY_TEXT(scaleStr, CLAY_TEXT_CONFIG({.textColor = {210, 230, 190, 255}, .fontSize = fs(13)}));
+                    }
+
+                    // + button
+                    Clay_Color scalePlusBg = hovScalePlus ? Clay_Color{60, 70, 120, 220} : Clay_Color{28, 30, 55, 200};
+                    CLAY(CLAY_ID("UiScalePlus"), {.layout = {
+                                                      .sizing = {CLAY_SIZING_FIXED(22), CLAY_SIZING_FIXED(22)},
+                                                      .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                  .backgroundColor = scalePlusBg,
+                                                  .cornerRadius = CLAY_CORNER_RADIUS(3)})
+                    {
+                        {
+                            bool n = Clay_Hovered();
+                            sndRollover(n, hovScalePlus);
+                            sndClick(n);
+                            hovScalePlus = n;
+                        }
+                        if (hovScalePlus && inp.lmbPressed)
+                            uiScale = std::min(2.0f, uiScale + 0.125f);
+                        CLAY_TEXT(CLAY_STRING("+"), CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = fs(13)}));
+                    }
+                }
             }
         }
     }
 
     // ── Mouse capture rects ───────────────────────────────────────────────────
-    ui.addMouseCaptureRect(12, 12, 310, 155);                   // info panel
-    ui.addMouseCaptureRect(inp.screenW - 195.0f, 12, 185, 200); // constellation panel
-    ui.addMouseCaptureRect(12, inp.screenH - 110.0f, 310, 100); // time panel
-    ui.addMouseCaptureRect(kSettingsBtnX, kSettingsBtnY,
-                           kSettingsBtnSize, kSettingsBtnSize); // settings button
+    ui.addMouseCaptureRect(12, inp.screenH - 110.0f, 340, 100); // time panel (bottom-left)
+    ui.addMouseCaptureRect(inp.screenW - 460.0f, inp.screenH - 52.0f,
+                           450.0f, 44.0f); // status bar (bottom-right)
     if (settingsOpen)
-        ui.addMouseCaptureRect((inp.screenW - 400.0f) * 0.5f,
-                               (inp.screenH - 440.0f) * 0.5f,
-                               400.0f, 440.0f); // settings window
+        ui.addMouseCaptureRect((inp.screenW - 500.0f) * 0.5f,
+                               (inp.screenH - 500.0f) * 0.5f,
+                               500.0f, 500.0f); // settings window
+}
+
+// ─── setAudio ─────────────────────────────────────────────────────────────────
+// Called by App after both sim and audio are initialised.
+// Configures the music playlist and stores the pointer for buildUI UI sounds.
+void SatelliteSim::setAudio(AudioSystem *audio)
+{
+    audio_ = audio;
+    if (!audio_)
+        return;
+
+    audio_->addTrack("assets/sound/music/gravity_wave.mp3");
+    audio_->addTrack("assets/sound/music/fuse.mp3");
+    audio_->startMusic();
 }
 
 // ─── cleanup ──────────────────────────────────────────────────────────────────
@@ -853,6 +1088,11 @@ void SatelliteSim::cleanup(VkDevice device)
     vkDestroyPipelineLayout(device, drawPipeLayout, nullptr);
     vkDestroyDescriptorPool(device, descPool, nullptr);
     vkDestroyDescriptorSetLayout(device, descLayout, nullptr);
+    vkDestroyDescriptorPool(device, skyDescPool, nullptr);
+    vkDestroyDescriptorSetLayout(device, skyDescLayout, nullptr);
+    vkUnmapMemory(device, glowMem);
+    vkDestroyBuffer(device, glowBuf, nullptr);
+    vkFreeMemory(device, glowMem, nullptr);
     vkUnmapMemory(device, satInputMem);
     vkDestroyBuffer(device, satInputBuf, nullptr);
     vkFreeMemory(device, satInputMem, nullptr);
@@ -1015,6 +1255,49 @@ void SatelliteSim::createComputePipeline(VulkanContext &ctx)
 }
 
 // ─── createSkyBgPipeline ──────────────────────────────────────────────────────
+// ─── createGlowResources ──────────────────────────────────────────────────────
+// Allocates the host-visible SSBO that holds up to kMaxGlows bright-flare entries,
+// and creates the descriptor set used by the sky background pipeline to read it.
+void SatelliteSim::createGlowResources(VulkanContext &ctx)
+{
+    VkDeviceSize bufSize = sizeof(GpuGlowBuf);
+    ctx.createBuffer(bufSize,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     glowBuf, glowMem);
+    vkMapMemory(ctx.device, glowMem, 0, bufSize, 0, &glowMapped);
+    memset(glowMapped, 0, bufSize);
+
+    VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                   VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    li.bindingCount = 1;
+    li.pBindings = &b;
+    vkCreateDescriptorSetLayout(ctx.device, &li, nullptr, &skyDescLayout);
+
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+    VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pi.poolSizeCount = 1;
+    pi.pPoolSizes = &ps;
+    pi.maxSets = 1;
+    vkCreateDescriptorPool(ctx.device, &pi, nullptr, &skyDescPool);
+
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = skyDescPool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &skyDescLayout;
+    vkAllocateDescriptorSets(ctx.device, &ai, &skyDescSet);
+
+    VkDescriptorBufferInfo bi{glowBuf, 0, VK_WHOLE_SIZE};
+    VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    wr.dstSet = skyDescSet;
+    wr.dstBinding = 0;
+    wr.descriptorCount = 1;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    wr.pBufferInfo = &bi;
+    vkUpdateDescriptorSets(ctx.device, 1, &wr, 0, nullptr);
+}
+
 // Fullscreen triangle that colors pixels sky or ground based on camera elevation.
 // Uses same push constant layout as the satellite draw pass (SatDrawPC).
 void SatelliteSim::createSkyBgPipeline(VulkanContext &ctx)
@@ -1068,6 +1351,8 @@ void SatelliteSim::createSkyBgPipeline(VulkanContext &ctx)
         VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                 0, sizeof(SatDrawPC)};
         VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        li.setLayoutCount = 1;
+        li.pSetLayouts = &skyDescLayout;
         li.pushConstantRangeCount = 1;
         li.pPushConstantRanges = &pcr;
         vkCreatePipelineLayout(ctx.device, &li, nullptr, &skyBgPipeLayout);
@@ -1423,8 +1708,8 @@ void SatelliteSim::initConstellation()
         {                                            // 1 — LEO broadband (OneWeb/Kuiper/Xingwang/Telesat): sun-tracking panels
          "LEO Broadband",
          {1.00f, 0.92f, 0.75f}, // warm white
-         12.0f,                 // ~12 m² typical LEO broadband bus + panels
-         {AttitudeMode::SunTracking, 6.0f, 1.0f},
+         5.0f,                  // ~12 m² typical LEO broadband bus + panels
+         {AttitudeMode::SunTracking, 18.0f, 1.0f},
          {AttitudeMode::Perpendicular, 0.0f, 0.0f},
          0.0f,   // no diffuse floor
          0.02f}, // mirrorFrac: moderate — sun-tracking panels occasionally flash
@@ -1453,12 +1738,12 @@ void SatelliteSim::initConstellation()
          // the horizon (AntiNadir face tilts toward the observer as satellite descends).
 
          "SpaceX AI Sats",
-         {1.00f, 1.00f, 0.92f},                      // cyan-teal (distinct from Starlink blue-white)
-         ai_sat_panel_area,                          // ~15 m² — Starlink-class bus + extra radiator area
-         {AttitudeMode::SunTracking, 18.0f, 1.0f},   // phased-array/compute face toward Earth
-         {AttitudeMode::Perpendicular, 7.0f, 0.25f}, // large radiator panels face deep space
-         0.005f,                                     // minimal structural body scatter
-         0.10f},                                     // mirrorFrac: similar to Starlink — polished compute face
+         {1.00f, 1.00f, 0.92f},                    // cyan-teal (distinct from Starlink blue-white)
+         ai_sat_panel_area,                        // ~15 m² — Starlink-class bus + extra radiator area
+         {AttitudeMode::SunTracking, 18.0f, 1.0f}, // phased-array/compute face toward Earth
+         {AttitudeMode::AntiNadir, 2.0f, 0.25f},   // large radiator panels face deep space
+         0.005f,                                   // minimal structural body scatter
+         0.01f},                                   // mirrorFrac: similar to Starlink — polished compute face
     };
 
     // ── Constellation shells ───────────────────────────────────────────────────
@@ -1626,22 +1911,17 @@ void SatelliteSim::initConstellation()
             float raan_d = c.raan;
             if (c.alignTerminator)
             {
-                // Inclination: derived from sunDirECI.z at epoch so that the orbit
-                // normal exactly equals sunDirECI — this places every satellite in
-                // the terminator plane at t=0, matching the original visual intent.
-                //   orbit_normal = sunDirECI  →  cos(i) = sun.z  →  i = acos(sun.z)
-                // Inclination is then FIXED for all time; only RAAN precesses.
-                // This avoids the seasonal inclination swings (67°–113°) that caused
-                // "weird results near the poles during winter/summer."
-                incl_d = acosf(glm::clamp(sunDirECI.z, -1.0f, 1.0f));
+                // Physically correct SSO inclination from the J2 nodal precession formula.
+                // Depends only on orbit altitude (~100.6° at 1250 km); does NOT vary with season.
+                incl_d = computeSSOInclination(c.altM);
 
-                // Initial RAAN: solving orbit_normal = sunDirECI for Ω gives
-                //   sin(Ω) = sun.x / sin(i),  cos(Ω) = −sun.y / sin(i)
-                //   → Ω₀ = atan2(sun.x, −sun.y)   (division by sin(i) cancels in atan2)
+                // Reference RAAN anchored at J2000 epoch (2000-01-01 12:00 TT).
+                // At J2000 the orbit is at the dawn-dusk terminator.  updatePositions()
+                // then applies liveRaan = raan_j2000 + kSSOPrecRate * t (absolute J2000 s),
+                // giving a fully deterministic sky position at any simulation date.
+                glm::vec3 sunJ2000 = sunDirECIAtJ2000();
                 float sinI = sinf(incl_d);
-                raan_d = (sinI > 1e-5f)
-                             ? atan2f(sunDirECI.x, -sunDirECI.y)
-                             : 0.0f;
+                raan_d = (sinI > 1e-5f) ? atan2f(sunJ2000.x, -sunJ2000.y) : 0.0f;
             }
 
             // Distribute satellites across numRings concentric rings.
@@ -1784,6 +2064,8 @@ void SatelliteSim::updatePositions(double t)
     // ── Per-constellation satellite geometry ──────────────────────────────────
     visibleCount = 0;
     peakMagnitude = 99.0f; // reset each frame; updated below for each visible sat
+    glowEntryCount    = 0;
+    glowMinIntensity  = 0.0f;
     for (const ConstellationConfig &c : constellations)
     {
         for (uint32_t i = c.orbitStart; i < c.orbitStart + c.orbitCount; ++i)
@@ -1808,12 +2090,12 @@ void SatelliteSim::updatePositions(double t)
                                   glm::two_pi<double>());
             float cosU = cosf(u), sinU = sinf(u);
 
-            // alignTerminator: precess RAAN at the SSO rate (2π/year) from the
-            // initial RAAN set at epoch.  Inclination is the fixed J2-derived SSO
-            // value stored in orb.incl — it never changes, only the nodal angle drifts.
+            // alignTerminator: precess RAAN at the SSO rate from the J2000-epoch reference RAAN.
+            // Using absolute t (J2000 seconds) makes the orbit position deterministic at any
+            // simulation date — changing the init time now produces a different sky position.
             float liveRaan = orb.alignTerminator
-                ? (float)fmod((double)orb.raan + kSSOPrecRate * (t - simTimeAtInit), glm::two_pi<double>())
-                : orb.raan;
+                                 ? (float)fmod((double)orb.raan + kSSOPrecRate * t, glm::two_pi<double>())
+                                 : orb.raan;
             float cosR = cosf(liveRaan), sinR = sinf(liveRaan);
 
             // Satellite ECI position (Rz(RAAN) · Rx(incl) · perifocal).
@@ -1874,12 +2156,11 @@ void SatelliteSim::updatePositions(double t)
                 }
                 default: // SunTracking
                 {
-                    // Solar panels rotate around the nadir body axis to track the sun's azimuth.
-                    // Panel normal = sun direction projected onto the satellite's local horizontal
-                    // plane (removes nadir component) to avoid the retroreflector degeneracy.
-                    glm::vec3 sunHoriz = sunDirECI - glm::dot(sunDirECI, satNadir) * satNadir;
-                    float horizLen = glm::length(sunHoriz);
-                    return (horizLen > 1e-5f) ? sunHoriz / horizLen : satNadir;
+                    // Two-axis sun-tracking: panel normal points directly at the sun.
+                    // reflect(-sunDir, sunDir) = sunDir, so specular peaks when
+                    // satToObs ≈ sunDir — i.e. when the satellite is at the antisolar
+                    // point of the sky.  irr0 = 1.0 (panel always fully lit).
+                    return sunDirECI;
                 }
                 }
             };
@@ -1926,6 +2207,76 @@ void SatelliteSim::updatePositions(double t)
                 {
                     float mag = kMagRef - 2.5f * log10f(baseFlare / kMagRefFlare);
                     peakMagnitude = std::min(peakMagnitude, mag);
+                }
+
+                // ── Full-specular peak tracking for sky glow ──────────────
+                // Mirrors the compute shader to detect transient specular
+                // flares (including mirror peaks) for the sky glow effect.
+                // Mirror peak computation guarded by alignment threshold so
+                // the expensive pow() only fires when geometry is close.
+                glm::vec3 satToObs = glm::normalize(-relPos);
+
+                // Shadow factor (same formula as compute shader).
+                glm::vec3 shadowDir = -sunDirECI;
+                float proj = glm::dot(satECI_abs, shadowDir);
+                glm::vec3 perpV = satECI_abs - proj * shadowDir;
+                float perpLen = glm::length(perpV);
+                float litF = (proj > 0.0f)
+                    ? glm::smoothstep(-kEarthRadius * 0.01f,
+                                       kEarthRadius * 0.01f,
+                                       perpLen - kEarthRadius)
+                    : 1.0f;
+
+                // Primary surface specular.
+                float irr0 = fabsf(glm::dot(sunDirECI, surfN0));
+                glm::vec3 n0 = (glm::dot(sunDirECI, surfN0) >= 0.0f) ? surfN0 : -surfN0;
+                glm::vec3 refl0 = glm::reflect(-sunDirECI, n0);
+                float cosR0 = std::max(0.0f, glm::dot(refl0, satToObs));
+                float spec0 = (type.primary.specExp < 0.01f)
+                    ? irr0 * std::max(0.0f, glm::dot(sunDirECI, satToObs))
+                    : irr0 * powf(cosR0, type.primary.specExp);
+
+                // Mirror peak: only compute when near perfect alignment.
+                if (cosR0 > 0.9f && type.mirrorFrac > 0.0f) {
+                    float mExp = std::max(type.primary.specExp * 300.0f, 8000.0f);
+                    spec0 += irr0 * powf(cosR0, mExp) * 300.0f * type.mirrorFrac;
+                }
+
+                // Secondary surface specular.
+                float irr1 = fabsf(glm::dot(sunDirECI, surfN1));
+                glm::vec3 n1 = (glm::dot(sunDirECI, surfN1) >= 0.0f) ? surfN1 : -surfN1;
+                glm::vec3 refl1 = glm::reflect(-sunDirECI, n1);
+                float cosR1 = std::max(0.0f, glm::dot(refl1, satToObs));
+                float spec1 = (type.secondary.specExp < 0.01f)
+                    ? irr1 * std::max(0.0f, glm::dot(sunDirECI, satToObs))
+                    : irr1 * powf(cosR1, type.secondary.specExp);
+
+                float specular = spec0 + spec1 * type.secondary.weight + type.diffuse;
+                float flareSpec = specular * litF * distFactor * crossSection * kBrightnessScale;
+                float effectSpec = flareSpec / (1.0f + dayBright * kDaySuppression);
+
+                if (effectSpec > 0.5f) {
+                    glm::vec4 entry{glm::normalize(glm::vec3(
+                        glm::dot(relPos, east),
+                        glm::dot(relPos, north),
+                        glm::dot(relPos, up))), effectSpec};
+                    if (glowEntryCount < kMaxGlows) {
+                        glowEntries[glowEntryCount++] = entry;
+                        if (glowEntryCount == kMaxGlows) {
+                            glowMinIntensity = FLT_MAX;
+                            for (int gi = 0; gi < kMaxGlows; ++gi)
+                                glowMinIntensity = std::min(glowMinIntensity, glowEntries[gi].w);
+                        }
+                    } else if (effectSpec > glowMinIntensity) {
+                        // Replace the weakest entry.
+                        int minIdx = 0;
+                        for (int gi = 1; gi < kMaxGlows; ++gi)
+                            if (glowEntries[gi].w < glowEntries[minIdx].w) minIdx = gi;
+                        glowEntries[minIdx] = entry;
+                        glowMinIntensity = FLT_MAX;
+                        for (int gi = 0; gi < kMaxGlows; ++gi)
+                            glowMinIntensity = std::min(glowMinIntensity, glowEntries[gi].w);
+                    }
                 }
             }
         }

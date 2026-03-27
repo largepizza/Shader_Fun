@@ -101,7 +101,7 @@ const float VIS_THRESH   = 0.008;       // flare intensity below this → invisi
 //
 // IMPORTANT: kBrightnessScale in SatelliteSim.cpp must mirror this value
 // so the CPU-side magnitude readout stays consistent with the GPU render.
-const float BRIGHTNESS_SCALE = 12.0;
+const float BRIGHTNESS_SCALE = 4.0;
 
 // ── Magnitude calibration ─────────────────────────────────────────────────────
 // Apparent magnitude is derived from effectFlare via the photometric scale:
@@ -166,7 +166,7 @@ const float MIRROR_BOOST = 300.0;
 //   Starlink peak Phong      (flare ≈ 0.6  ): effectFlare ≈ 0.004  → invisible ✓
 //   Starlink mirror peak     (flare ≈ 30   ): effectFlare ≈ 0.20   → visible   ✓
 //   ISS mirror peak          (flare ≈ 480  ): effectFlare ≈ 3.2    → brilliant ✓
-const float DAY_SUPPRESSION = 150.0;
+const float DAY_SUPPRESSION = 50.0;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;

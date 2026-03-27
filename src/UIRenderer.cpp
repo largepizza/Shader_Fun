@@ -729,8 +729,8 @@ void UIRenderer::addMouseCaptureRect(float x, float y, float w, float h) {
 void UIRenderer::pushQuad(float x, float y, float w, float h,
                            float u0, float v0, float u1, float v1,
                            glm::vec4 color, float mode) {
-    if (vertices.size() + 4 > MAX_VERTS) return;
-    if (indices.size()  + 6 > MAX_INDICES) return;
+    if (batchVertOffset + vertices.size() + 4 > MAX_VERTS)   return;
+    if (batchIdxOffset  + indices.size()  + 6 > MAX_INDICES) return;
 
     uint32_t base = (uint32_t)vertices.size();
 
@@ -799,8 +799,11 @@ void UIRenderer::pushText(float x, float y, const char* text, int len,
 void UIRenderer::flushBatch(VkCommandBuffer cmd) {
     if (vertices.empty()) return;
 
-    memcpy(vertMapped, vertices.data(), vertices.size() * sizeof(UIVertex));
-    memcpy(idxMapped,  indices.data(),  indices.size()  * sizeof(uint32_t));
+    // Write this batch into its reserved slice of the persistent buffers.
+    memcpy((char*)vertMapped + batchVertOffset * sizeof(UIVertex),
+           vertices.data(), vertices.size() * sizeof(UIVertex));
+    memcpy((char*)idxMapped  + batchIdxOffset  * sizeof(uint32_t),
+           indices.data(),  indices.size()  * sizeof(uint32_t));
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -810,11 +813,15 @@ void UIRenderer::flushBatch(VkCommandBuffer cmd) {
     vkCmdPushConstants(cmd, pipeLayout, VK_SHADER_STAGE_VERTEX_BIT,
                         0, sizeof(pc), &pc);
 
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vertBuf, &offset);
-    vkCmdBindIndexBuffer(cmd, idxBuf, 0, VK_INDEX_TYPE_UINT32);
+    // Bind vertex and index buffers starting at this batch's offset so each
+    // recorded draw command references its own non-overwritten region.
+    VkDeviceSize vertByteOffset = batchVertOffset * sizeof(UIVertex);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &vertBuf, &vertByteOffset);
+    vkCmdBindIndexBuffer(cmd, idxBuf, batchIdxOffset * sizeof(uint32_t), VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(cmd, (uint32_t)indices.size(), 1, 0, 0, 0);
 
+    batchVertOffset += (uint32_t)vertices.size();
+    batchIdxOffset  += (uint32_t)indices.size();
     vertices.clear();
     indices.clear();
 }
@@ -823,6 +830,10 @@ void UIRenderer::flushBatch(VkCommandBuffer cmd) {
 // record — finalise Clay layout, emit draw commands
 // ─────────────────────────────────────────────────────────────────────────────
 void UIRenderer::record(VkCommandBuffer cmd, VulkanContext& ctx) {
+    // Reset per-frame batch write offsets so each flush appends rather than overwrites.
+    batchVertOffset = 0;
+    batchIdxOffset  = 0;
+
     // Set initial full-viewport dynamic scissor so subsequent draws are unclipped
     VkRect2D fullScissor{ {0, 0}, ctx.swapExtent };
     vkCmdSetScissor(cmd, 0, 1, &fullScissor);
@@ -914,8 +925,8 @@ void UIRenderer::record(VkCommandBuffer cmd, VulkanContext& ctx) {
         }
 
         case CLAY_RENDER_COMMAND_TYPE_IMAGE: {
-            // imageData encodes the icon index as a pointer-sized integer.
-            int iconIdx = (int)(intptr_t)rc->renderData.image.imageData;
+            // imageData encodes the icon index as (idx+1) so that index 0 is non-null.
+            int iconIdx = (int)(intptr_t)rc->renderData.image.imageData - 1;
             if (iconIdx >= 0 && iconIdx < (int)iconEntries.size()) {
                 const IconEntry& ie = iconEntries[iconIdx];
                 pushQuad(bb.x, bb.y, bb.width, bb.height,

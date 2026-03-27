@@ -4,6 +4,12 @@ layout(location = 0) in  vec3 enuDir;
 layout(location = 1) in flat vec4 sunDirENU;  // xyz = sun dir in ENU, w = sin(elevation)
 layout(location = 2) in flat vec4 moonDirENU; // xyz = moon dir in ENU, w = illuminated fraction
 
+// Top-N bright satellite flares — written by CPU each frame, no smoothing.
+layout(std430, set = 0, binding = 0) readonly buffer GlowBuf {
+    int  count;
+    vec4 entries[16]; // xyz = ENU unit dir, w = effectFlare intensity
+} glowBuf;
+
 layout(location = 0) out vec4 outColor;
 
 const float PI = 3.14159265359;
@@ -167,6 +173,25 @@ void main() {
             // Atmospheric extinction: identical treatment to background starlight.
             vec3 moonAttn = exp(-(BETA_R * odR_cam + BETA_M * 1.1 * odM_cam));
             color += moonColor * moonAttn;
+        }
+    }
+
+    // ── Satellite flare glow (pre-tonemap, atmospheric tinting at horizon) ──────
+    // Sum contributions from all top-N bright flares.  No smoothing — reacts
+    // instantly to camera movement and shows simultaneous glows.
+    if (glowBuf.count > 0) {
+        vec3  flareAttn = exp(-(BETA_R * odR_cam + BETA_M * 1.1 * odM_cam));
+        float hClip     = smoothstep(-0.02, 0.03, dir.z);
+        const float kSig = 0.10; // ~5.7° sigma
+        for (int gi = 0; gi < glowBuf.count; ++gi) {
+            vec4  e      = glowBuf.entries[gi];
+            if (e.z < -0.08) continue;                        // below horizon
+            vec3  fd     = normalize(e.xyz);
+            float angle  = acos(clamp(dot(dir, fd), -1.0, 1.0));
+            float glow   = exp(-angle * angle / (2.0 * kSig * kSig));
+            float gElev  = smoothstep(-0.08, 0.02, e.z);
+            float intens = clamp(log2(max(e.w, 1.0)) / 4.0, 0.0, 1.5);
+            color += hClip * gElev * glow * intens * 0.06 * vec3(1.0, 0.96, 0.88) * flareAttn;
         }
     }
 
