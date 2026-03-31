@@ -18,12 +18,14 @@ Real-time visualization of satellite constellation flares as seen from any point
 - **~99k satellites** across 10 real constellations (Starlink Gen1/2, OneWeb, Kuiper, Xingwang, Telesat, GEO belt, ISS, SpaceX ODC)
 - **Multi-surface photometry** — each satellite type has primary + secondary reflective surfaces with specular/Lambertian BRDFs, mirror peak flash model, and diffuse floor
 - **Physically-based sky** — Rayleigh + Mie atmospheric scattering with analytic auto-exposure; sun, moon disc + halo, star catalog
-- **Satellite sky glow** — up to 16 brightest flares contribute Gaussian sky illumination with proper atmospheric extinction (orange near horizon)
+- **Satellite sky glow** — up to 64 brightest flares contribute Gaussian sky illumination with proper atmospheric extinction (orange near horizon)
 - **Daytime suppression** — flares fade across the terminator with a realistic atmospheric ramp
 - **SSO precession** — SpaceX ODC terminator-aligned disk shell precesses at 360°/year to stay sun-synchronous
 - **Audio** — spatial flare sound events via miniaudio; volume controls in Settings panel
-- **Time controls** — pause, reverse, and warp from real-time to 1000× speed
-- **Floating UI** — constellation toggles, camera/display settings, time panel, status bar
+- **Time controls** — pause, reverse, and warp from real-time to 1 year/s (1×, 1m, 5m, 1h, 1d, 1w, 1mo, 1yr)
+- **Fixed start epoch** — simulation begins at UTC 2026-03-30 05:53:58, observer at 67°S 67°W, moon phase calibrated to match real sky (~91% waxing gibbous)
+- **Cinematic intro** — full-screen overlay on launch with scene context and controls; dismiss with any key or click
+- **Floating UI** — constellation toggles, camera/display settings, time panel, status bar; black/red colour theme
 
 ## Prerequisites
 

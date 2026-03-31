@@ -77,15 +77,10 @@ static glm::vec3 sunDirECIAtJ2000()
 // ─── init ─────────────────────────────────────────────────────────────────────
 void SatelliteSim::init(VulkanContext &ctx)
 {
-    // Seed simTime from real UTC so solar position is accurate.
-    // J2000.0 = 2000-01-01 12:00:00 UTC = Unix timestamp 946728000.
-    {
-        auto now = std::chrono::system_clock::now();
-        auto summer_solstice_2024 = std::chrono::system_clock::from_time_t(1714065600); // 2024-06-25 00:00:00 UTC
-        auto j2000 = std::chrono::system_clock::from_time_t(946728000);
-        simTime = std::chrono::duration<double>(now - j2000).count();
-        simTimeAtInit = simTime;
-    }
+    // Fixed start time: 2026-03-30 05:53:58 UTC
+    // J2000.0 = 2000-01-01 12:00:00 UTC = Unix 946728000
+    // 2026-03-30 05:53:58 UTC = Unix 1774849038
+    simTime = simTimeAtInit = 1774849038.0 - 946728000.0 + 11 * 3600; // 828121038 s from J2000
 
     ctx_ = &ctx;
 
@@ -167,7 +162,7 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
 
     // Upload top-N glow entries to the sky shader's SSBO.
     {
-        GpuGlowBuf* gb = static_cast<GpuGlowBuf*>(glowMapped);
+        GpuGlowBuf *gb = static_cast<GpuGlowBuf *>(glowMapped);
         gb->count = glowEntryCount;
         for (int gi = 0; gi < glowEntryCount; ++gi)
             gb->entries[gi] = glowEntries[gi];
@@ -299,6 +294,47 @@ static const char *keyDisplayName(int key)
     }
 }
 
+// ── UI color palette ──────────────────────────────────────────────────────────
+// Edit here to restyle the entire UI. All buildUI colors reference these names.
+namespace Pal
+{
+    // Backgrounds
+    constexpr Clay_Color panelBg = {8, 8, 9, 210};        // floating panel
+    constexpr Clay_Color panelBgFade = {8, 8, 9, 180};    // panel, slightly transparent
+    constexpr Clay_Color panelSolid = {12, 12, 13, 245};  // settings window
+    constexpr Clay_Color titleBar = {18, 18, 19, 255};    // title / header strip
+    constexpr Clay_Color sectionHdr = {22, 22, 23, 130};  // section divider strip
+    constexpr Clay_Color rowEnabled = {45, 10, 10, 180};  // enabled constellation row
+    constexpr Clay_Color rowDisabled = {16, 16, 17, 160}; // disabled constellation row
+    constexpr Clay_Color listenRow = {50, 10, 10, 185};   // keybind capture row
+    // Buttons
+    constexpr Clay_Color btnIdle = {30, 30, 31, 210};      // default button
+    constexpr Clay_Color btnHover = {52, 52, 54, 230};     // hovered button
+    constexpr Clay_Color btnAccent = {150, 20, 20, 240};   // ON / active (red)
+    constexpr Clay_Color btnAccentHv = {100, 15, 15, 230}; // accent hovered
+    constexpr Clay_Color closeBgIdle = {50, 16, 16, 180};  // [X] idle
+    constexpr Clay_Color closeBgHov = {170, 30, 30, 220};  // [X] hovered
+    constexpr Clay_Color pauseActive = {140, 25, 25, 230}; // pause btn when paused
+    constexpr Clay_Color listenBtn = {120, 18, 18, 220};   // rebind btn while listening
+    // Chrome
+    constexpr Clay_Color divider = {48, 48, 50, 120}; // separator line
+    // Text
+    constexpr Clay_Color textPrimary = {205, 205, 210, 255}; // main readable text
+    constexpr Clay_Color textDim = {130, 130, 135, 200};     // secondary / dim
+    constexpr Clay_Color textHint = {72, 72, 76, 160};       // hint / footer
+    constexpr Clay_Color textSection = {155, 155, 165, 200}; // section header labels
+    constexpr Clay_Color textCamera = {110, 110, 115, 180};  // dim descriptive text
+    constexpr Clay_Color volLabel = {185, 185, 195, 220};    // vol/scale label
+    constexpr Clay_Color volValue = {210, 210, 215, 255};    // vol/scale value readout
+    constexpr Clay_Color btnLabel = {210, 210, 215, 255};    // text inside +/- buttons
+    constexpr Clay_Color listenKey = {255, 85, 85, 255};     // key label while listening
+    constexpr Clay_Color keyText = {140, 140, 145, 200};     // normal key label
+    // Speed indicator
+    constexpr Clay_Color speedFwd = {200, 55, 55, 220};    // forward (red)
+    constexpr Clay_Color speedRev = {155, 155, 165, 220};  // reverse (grey)
+    constexpr Clay_Color speedPaused = {95, 95, 100, 220}; // paused (dark grey)
+}
+
 // ─── buildUI ──────────────────────────────────────────────────────────────────
 void SatelliteSim::buildUI(float dt, UIRenderer &ui)
 {
@@ -382,7 +418,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
     // ── Simulated UTC time string ─────────────────────────────────────────────
     static char timeBuf[32];
     {
-        time_t unixSim = (time_t)(simTime) + 946728000;
+        time_t unixSim = (time_t)(simTime) + 946738000;
         struct tm *utc = gmtime(&unixSim);
         if (utc)
             snprintf(timeBuf, sizeof(timeBuf), "UTC %04d-%02d-%02d %02d:%02d:%02d",
@@ -437,7 +473,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                     .padding = {10, 10, 8, 8},
                                     .childGap = 6,
                                     .layoutDirection = CLAY_TOP_TO_BOTTOM},
-                                .backgroundColor = {8, 10, 20, 210},
+                                .backgroundColor = Pal::panelBg,
                                 .cornerRadius = CLAY_CORNER_RADIUS(6),
                                 .floating = {.offset = {12, inp.screenH - 110.0f}, .zIndex = 5, .attachTo = CLAY_ATTACH_TO_ROOT}})
     {
@@ -450,12 +486,12 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
         {
             Clay_String timeStr{false, (int32_t)strlen(timeBuf), timeBuf};
             CLAY_TEXT(timeStr,
-                      CLAY_TEXT_CONFIG({.textColor = {160, 200, 160, 220}, .fontSize = fs(12)}));
+                      CLAY_TEXT_CONFIG({.textColor = Pal::textDim, .fontSize = fs(12)}));
 
             // Speed / direction label
-            Clay_Color speedCol = timePaused       ? Clay_Color{200, 100, 60, 220}
-                                  : timeDir < 0.0f ? Clay_Color{180, 120, 255, 220}
-                                                   : Clay_Color{120, 200, 255, 220};
+            Clay_Color speedCol = timePaused       ? Pal::speedPaused
+                                  : timeDir < 0.0f ? Pal::speedRev
+                                                   : Pal::speedFwd;
             Clay_String speedStr{false, (int32_t)strlen(speedBuf), speedBuf};
             CLAY_TEXT(speedStr, CLAY_TEXT_CONFIG({.textColor = speedCol, .fontSize = fs(12)}));
         }
@@ -470,7 +506,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                          .layoutDirection = CLAY_LEFT_TO_RIGHT}})
         {
             // ── Slow down ─────────────────────────────────────────────────────
-            Clay_Color slowBg = hovTimeSlower ? Clay_Color{60, 60, 100, 230} : Clay_Color{30, 30, 55, 210};
+            Clay_Color slowBg = hovTimeSlower ? Pal::btnHover : Pal::btnIdle;
             CLAY(CLAY_ID("TimeSlowerBtn"), {.layout = {
                                                 .sizing = {CLAY_SIZING_FIXED(kBtnSize), CLAY_SIZING_FIXED(kBtnSize)},
                                                 .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -492,8 +528,8 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
 
             // ── Pause / Play ──────────────────────────────────────────────────
             Clay_Color pauseBg = timePaused
-                                     ? Clay_Color{160, 60, 30, 230}
-                                     : (hovTimePause ? Clay_Color{60, 60, 100, 230} : Clay_Color{30, 30, 55, 210});
+                                     ? Pal::pauseActive
+                                     : (hovTimePause ? Pal::btnHover : Pal::btnIdle);
             CLAY(CLAY_ID("TimePauseBtn"), {.layout = {
                                                .sizing = {CLAY_SIZING_FIXED(kBtnSize), CLAY_SIZING_FIXED(kBtnSize)},
                                                .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -515,7 +551,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
             }
 
             // ── Speed up ──────────────────────────────────────────────────────
-            Clay_Color fastBg = hovTimeFaster ? Clay_Color{60, 60, 100, 230} : Clay_Color{30, 30, 55, 210};
+            Clay_Color fastBg = hovTimeFaster ? Pal::btnHover : Pal::btnIdle;
             CLAY(CLAY_ID("TimeFasterBtn"), {.layout = {
                                                 .sizing = {CLAY_SIZING_FIXED(kBtnSize), CLAY_SIZING_FIXED(kBtnSize)},
                                                 .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -538,7 +574,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
 
         // Hint text
         CLAY_TEXT(CLAY_STRING(",/. = speed  Space = pause  R = reverse  Tab = hide UI"),
-                  CLAY_TEXT_CONFIG({.textColor = {90, 90, 120, 160}, .fontSize = fs(10)}));
+                  CLAY_TEXT_CONFIG({.textColor = Pal::textHint, .fontSize = fs(10)}));
     }
 
     // ── Status bar (bottom-right): lat/lon, fps, vis count, settings gear ────
@@ -546,7 +582,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
         const int kSBBtnSz = 22;
         const int kSBIconSz = 14;
         const int kGearSz = 28;
-        Clay_Color settingsBg = hovSettings ? Clay_Color{60, 60, 100, 230} : Clay_Color{20, 20, 40, 180};
+        Clay_Color settingsBg = hovSettings ? Pal::btnHover : Pal::panelBgFade;
 
         CLAY(CLAY_ID("StatusBar"), {.layout = {
                                         .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(38)},
@@ -554,12 +590,12 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                         .childGap = 7,
                                         .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                                         .layoutDirection = CLAY_LEFT_TO_RIGHT},
-                                    .backgroundColor = {8, 10, 20, 210},
+                                    .backgroundColor = Pal::panelBg,
                                     .cornerRadius = CLAY_CORNER_RADIUS(6),
                                     .floating = {.offset = {-12.0f, -12.0f}, .zIndex = 5, .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_BOTTOM, .parent = CLAY_ATTACH_POINT_RIGHT_BOTTOM}, .attachTo = CLAY_ATTACH_TO_ROOT}})
         {
             // ── Lat south button ──────────────────────────────────────────────
-            Clay_Color sbSBg = hovLatSouth ? Clay_Color{60, 60, 110, 230} : Clay_Color{28, 28, 52, 210};
+            Clay_Color sbSBg = hovLatSouth ? Pal::btnHover : Pal::btnIdle;
             CLAY(CLAY_ID("SBLatSBtn"), {.layout = {
                                             .sizing = {CLAY_SIZING_FIXED(kSBBtnSz), CLAY_SIZING_FIXED(kSBBtnSz)},
                                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -585,11 +621,11 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
             {
                 if (Clay_Hovered() && inp.scrollY != 0.0f)
                     setLat(obsLatDeg + inp.scrollY * 5.0f);
-                CLAY_TEXT(latStr, CLAY_TEXT_CONFIG({.textColor = {210, 230, 190, 255}, .fontSize = fs(12)}));
+                CLAY_TEXT(latStr, CLAY_TEXT_CONFIG({.textColor = Pal::volValue, .fontSize = fs(12)}));
             }
 
             // ── Lat north button ──────────────────────────────────────────────
-            Clay_Color sbNBg = hovLatNorth ? Clay_Color{60, 60, 110, 230} : Clay_Color{28, 28, 52, 210};
+            Clay_Color sbNBg = hovLatNorth ? Pal::btnHover : Pal::btnIdle;
             CLAY(CLAY_ID("SBLatNBtn"), {.layout = {
                                             .sizing = {CLAY_SIZING_FIXED(kSBBtnSz), CLAY_SIZING_FIXED(kSBBtnSz)},
                                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -609,40 +645,40 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
             }
 
             CLAY(CLAY_ID("SBDiv1"), {.layout = {.sizing = {CLAY_SIZING_FIXED(1), CLAY_SIZING_FIXED(20)}},
-                                     .backgroundColor = {60, 70, 100, 120}}) {}
+                                     .backgroundColor = Pal::divider}) {}
 
             // ── Lon display ───────────────────────────────────────────────────
             CLAY(CLAY_ID("SBLonDisplay"), {.layout = {
                                                .sizing = {CLAY_SIZING_FIXED(62), CLAY_SIZING_FIT(0)},
                                                .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
             {
-                CLAY_TEXT(lonStr, CLAY_TEXT_CONFIG({.textColor = {210, 230, 190, 255}, .fontSize = fs(12)}));
+                CLAY_TEXT(lonStr, CLAY_TEXT_CONFIG({.textColor = Pal::volValue, .fontSize = fs(12)}));
             }
 
             CLAY(CLAY_ID("SBDiv2"), {.layout = {.sizing = {CLAY_SIZING_FIXED(1), CLAY_SIZING_FIXED(20)}},
-                                     .backgroundColor = {60, 70, 100, 120}}) {}
+                                     .backgroundColor = Pal::divider}) {}
 
             // ── FPS ───────────────────────────────────────────────────────────
             CLAY(CLAY_ID("SBFps"), {.layout = {
                                         .sizing = {CLAY_SIZING_FIXED(50), CLAY_SIZING_FIT(0)},
                                         .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
             {
-                CLAY_TEXT(statFpsStr, CLAY_TEXT_CONFIG({.textColor = {120, 180, 120, 200}, .fontSize = fs(12)}));
+                CLAY_TEXT(statFpsStr, CLAY_TEXT_CONFIG({.textColor = Pal::textDim, .fontSize = fs(12)}));
             }
 
             CLAY(CLAY_ID("SBDiv3"), {.layout = {.sizing = {CLAY_SIZING_FIXED(1), CLAY_SIZING_FIXED(20)}},
-                                     .backgroundColor = {60, 70, 100, 120}}) {}
+                                     .backgroundColor = Pal::divider}) {}
 
             // ── Visible sat count ─────────────────────────────────────────────
             CLAY(CLAY_ID("SBVis"), {.layout = {
                                         .sizing = {CLAY_SIZING_FIXED(60), CLAY_SIZING_FIT(0)},
                                         .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
             {
-                CLAY_TEXT(statVisStr, CLAY_TEXT_CONFIG({.textColor = {140, 170, 220, 220}, .fontSize = fs(12)}));
+                CLAY_TEXT(statVisStr, CLAY_TEXT_CONFIG({.textColor = Pal::textSection, .fontSize = fs(12)}));
             }
 
             CLAY(CLAY_ID("SBDiv4"), {.layout = {.sizing = {CLAY_SIZING_FIXED(1), CLAY_SIZING_FIXED(20)}},
-                                     .backgroundColor = {60, 70, 100, 120}}) {}
+                                     .backgroundColor = Pal::divider}) {}
 
             // ── Settings gear button ──────────────────────────────────────────
             CLAY(CLAY_ID("SettingsBtn"), {.layout = {
@@ -678,7 +714,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                           .padding = {0, 0, 0, 0},
                                           .childGap = 0,
                                           .layoutDirection = CLAY_TOP_TO_BOTTOM},
-                                      .backgroundColor = {12, 14, 28, 245},
+                                      .backgroundColor = Pal::panelSolid,
                                       .cornerRadius = CLAY_CORNER_RADIUS(8),
                                       .floating = {.offset = {kWinX, kWinY}, .zIndex = 10, .attachTo = CLAY_ATTACH_TO_ROOT}})
         {
@@ -689,18 +725,18 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                    .childGap = 0,
                                                    .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                                                    .layoutDirection = CLAY_LEFT_TO_RIGHT},
-                                               .backgroundColor = {18, 22, 45, 255},
+                                               .backgroundColor = Pal::titleBar,
                                                .cornerRadius = {8, 8, 0, 0}})
             {
                 CLAY_TEXT(CLAY_STRING("Settings"),
-                          CLAY_TEXT_CONFIG({.textColor = {200, 220, 255, 255}, .fontSize = fs(16)}));
+                          CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(16)}));
 
                 // Spacer
                 CLAY(CLAY_ID("SettingsTitleSpacer"), {.layout = {
                                                           .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
 
                 // Close button [X]
-                Clay_Color closeBg = hovSettingsClose ? Clay_Color{180, 40, 40, 220} : Clay_Color{60, 30, 30, 180};
+                Clay_Color closeBg = hovSettingsClose ? Pal::closeBgHov : Pal::closeBgIdle;
                 CLAY(CLAY_ID("SettingsCloseBtn"), {.layout = {
                                                        .sizing = {CLAY_SIZING_FIXED(24), CLAY_SIZING_FIXED(24)},
                                                        .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -716,7 +752,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                     if (hovSettingsClose && inp.lmbPressed)
                         settingsOpen = false;
                     CLAY_TEXT(CLAY_STRING("X"),
-                              CLAY_TEXT_CONFIG({.textColor = {230, 200, 200, 255}, .fontSize = fs(12)}));
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(12)}));
                 }
             }
 
@@ -730,10 +766,10 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
             {
                 // ── Constellations ────────────────────────────────────────────
                 CLAY_TEXT(CLAY_STRING("Constellations"),
-                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = fs(14)}));
+                          CLAY_TEXT_CONFIG({.textColor = Pal::textSection, .fontSize = fs(14)}));
                 CLAY(CLAY_ID("ConstSep"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
                                                       .padding = {0, 0, 4, 4}},
-                                           .backgroundColor = {40, 50, 80, 120}}) {}
+                                           .backgroundColor = Pal::sectionHdr}) {}
 
                 static char constCntBuf[10][16];
                 for (int ci = 0; ci < (int)constellations.size() && ci < 10; ++ci)
@@ -742,8 +778,8 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                     snprintf(constCntBuf[ci], sizeof(constCntBuf[ci]), "%u", c.orbitCount);
 
                     Clay_Color rowBg = c.enabled
-                                           ? Clay_Color{20, 50, 90, 180}
-                                           : Clay_Color{20, 20, 35, 160};
+                                           ? Pal::rowEnabled
+                                           : Pal::rowDisabled;
                     CLAY(CLAY_IDI("ConstRow", ci), {.layout = {
                                                         .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(24)},
                                                         .padding = {4, 4, 3, 3},
@@ -754,8 +790,8 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                     .cornerRadius = CLAY_CORNER_RADIUS(3)})
                     {
                         Clay_Color btnBg = c.enabled
-                                               ? Clay_Color{30, 130, 60, 240}
-                                               : (hovConst[ci] ? Clay_Color{80, 40, 40, 230} : Clay_Color{55, 25, 25, 210});
+                                               ? Pal::btnAccent
+                                               : (hovConst[ci] ? Pal::btnAccentHv : Pal::btnIdle);
                         CLAY(CLAY_IDI("ConstBtn", ci), {.layout = {
                                                             .sizing = {CLAY_SIZING_FIXED(30), CLAY_SIZING_FIXED(18)},
                                                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -771,27 +807,27 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                             if (hovConst[ci] && inp.lmbPressed)
                                 c.enabled = !c.enabled;
                             CLAY_TEXT(c.enabled ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
-                                      CLAY_TEXT_CONFIG({.textColor = {220, 230, 255, 255}, .fontSize = fs(10)}));
+                                      CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(10)}));
                         }
                         CLAY(CLAY_IDI("ConstName", ci), {.layout = {.sizing = {CLAY_SIZING_FIXED(150), CLAY_SIZING_FIT(0)}}})
                         {
                             Clay_String nameStr{false, (int32_t)strlen(c.name), c.name};
-                            CLAY_TEXT(nameStr, CLAY_TEXT_CONFIG({.textColor = {180, 200, 240, 220}, .fontSize = fs(12)}));
+                            CLAY_TEXT(nameStr, CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(12)}));
                         }
                         Clay_String cntStr{false, (int32_t)strlen(constCntBuf[ci]), constCntBuf[ci]};
-                        CLAY_TEXT(cntStr, CLAY_TEXT_CONFIG({.textColor = {110, 130, 170, 180}, .fontSize = fs(11)}));
+                        CLAY_TEXT(cntStr, CLAY_TEXT_CONFIG({.textColor = Pal::textCamera, .fontSize = fs(11)}));
                     }
                 }
 
                 // ── Sound ────────────────────────────────────────────────────
                 CLAY(CLAY_ID("SndTopSep"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
                                                        .padding = {0, 0, 6, 4}},
-                                            .backgroundColor = {40, 50, 80, 120}}) {}
+                                            .backgroundColor = Pal::sectionHdr}) {}
                 CLAY_TEXT(CLAY_STRING("Sound"),
-                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = fs(14)}));
+                          CLAY_TEXT_CONFIG({.textColor = Pal::textSection, .fontSize = fs(14)}));
                 CLAY(CLAY_ID("SndSep"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
                                                     .padding = {0, 0, 4, 4}},
-                                         .backgroundColor = {40, 50, 80, 120}}) {}
+                                         .backgroundColor = Pal::sectionHdr}) {}
 
                 // Helper: one volume row (label, spacer, −, value, +)
                 // We use a macro-like lambda to avoid copy-pasting Clay layout 3 times.
@@ -826,11 +862,11 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                         CLAY(CLAY_IDI("VolLabel", vr.bufIdx), {.layout = {.sizing = {CLAY_SIZING_FIXED(76), CLAY_SIZING_FIT(0)}}})
                         {
                             Clay_String lblStr{false, (int32_t)strlen(vr.label), vr.label};
-                            CLAY_TEXT(lblStr, CLAY_TEXT_CONFIG({.textColor = {180, 200, 240, 220}, .fontSize = fs(12)}));
+                            CLAY_TEXT(lblStr, CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(12)}));
                         }
                         CLAY(CLAY_IDI("VolSpc", vr.bufIdx), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
                         // − button
-                        Clay_Color cMinus = vr.hMinus ? Clay_Color{60, 70, 120, 220} : Clay_Color{28, 30, 55, 200};
+                        Clay_Color cMinus = vr.hMinus ? Pal::btnHover : Pal::btnIdle;
                         CLAY(CLAY_IDI("VolMinus", vr.bufIdx), {.layout = {
                                                                    .sizing = {CLAY_SIZING_FIXED(20), CLAY_SIZING_FIXED(20)},
                                                                    .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -850,17 +886,17 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                 else if (vr.bufIdx == 2 && audio_)
                                     audio_->setSfxVolume(audio_->getSfxVolume() - 0.05f);
                             }
-                            CLAY_TEXT(CLAY_STRING("-"), CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = fs(12)}));
+                            CLAY_TEXT(CLAY_STRING("-"), CLAY_TEXT_CONFIG({.textColor = Pal::btnLabel, .fontSize = fs(12)}));
                         }
                         // value
                         CLAY(CLAY_IDI("VolVal", vr.bufIdx), {.layout = {
                                                                  .sizing = {CLAY_SIZING_FIXED(38), CLAY_SIZING_FIT(0)},
                                                                  .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
                         {
-                            CLAY_TEXT(volStr, CLAY_TEXT_CONFIG({.textColor = {210, 230, 190, 255}, .fontSize = fs(12)}));
+                            CLAY_TEXT(volStr, CLAY_TEXT_CONFIG({.textColor = Pal::volValue, .fontSize = fs(12)}));
                         }
                         // + button
-                        Clay_Color cPlus = vr.hPlus ? Clay_Color{60, 70, 120, 220} : Clay_Color{28, 30, 55, 200};
+                        Clay_Color cPlus = vr.hPlus ? Pal::btnHover : Pal::btnIdle;
                         CLAY(CLAY_IDI("VolPlus", vr.bufIdx), {.layout = {
                                                                   .sizing = {CLAY_SIZING_FIXED(20), CLAY_SIZING_FIXED(20)},
                                                                   .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -880,7 +916,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                 else if (vr.bufIdx == 2 && audio_)
                                     audio_->setSfxVolume(audio_->getSfxVolume() + 0.05f);
                             }
-                            CLAY_TEXT(CLAY_STRING("+"), CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = fs(12)}));
+                            CLAY_TEXT(CLAY_STRING("+"), CLAY_TEXT_CONFIG({.textColor = Pal::btnLabel, .fontSize = fs(12)}));
                         }
                     }
                 }
@@ -888,15 +924,15 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                 // ── Controls ──────────────────────────────────────────────────
                 CLAY(CLAY_ID("SndCtrlSep"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
                                                         .padding = {0, 0, 6, 4}},
-                                             .backgroundColor = {40, 50, 80, 120}}) {}
+                                             .backgroundColor = Pal::sectionHdr}) {}
                 CLAY_TEXT(CLAY_STRING("Controls"),
-                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = fs(14)}));
+                          CLAY_TEXT_CONFIG({.textColor = Pal::textSection, .fontSize = fs(14)}));
 
                 // Thin separator
                 CLAY(CLAY_ID("CtrlSep"), {.layout = {
                                               .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
                                               .padding = {0, 0, 4, 4}},
-                                          .backgroundColor = {40, 50, 80, 120}}) {}
+                                          .backgroundColor = Pal::sectionHdr}) {}
 
                 // One row per keybinding
                 static char kbKeyBuf[8][16];
@@ -906,7 +942,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                     snprintf(kbKeyBuf[ki], sizeof(kbKeyBuf[ki]), "[%s]", keyDisplayName(kb.key));
 
                     Clay_Color rowBg = kb.listening
-                                           ? Clay_Color{60, 40, 10, 180}
+                                           ? Pal::listenRow
                                            : Clay_Color{0, 0, 0, 0};
                     CLAY(CLAY_IDI("KbRow", ki), {.layout = {
                                                      .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28)},
@@ -923,7 +959,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                         {
                             Clay_String actStr{false, (int32_t)strlen(kb.action), kb.action};
                             CLAY_TEXT(actStr,
-                                      CLAY_TEXT_CONFIG({.textColor = {180, 200, 240, 220}, .fontSize = fs(13)}));
+                                      CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(13)}));
                         }
 
                         // Current key label (fixed width)
@@ -932,16 +968,16 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                         {
                             Clay_String keyStr{false, (int32_t)strlen(kbKeyBuf[ki]), kbKeyBuf[ki]};
                             Clay_Color keyCol = kb.listening
-                                                    ? Clay_Color{255, 180, 60, 255}
-                                                    : Clay_Color{140, 160, 200, 200};
+                                                    ? Pal::listenKey
+                                                    : Pal::keyText;
                             CLAY_TEXT(keyStr,
                                       CLAY_TEXT_CONFIG({.textColor = keyCol, .fontSize = fs(13)}));
                         }
 
                         // Rebind button
                         Clay_Color rebindBg = kb.listening
-                                                  ? Clay_Color{120, 80, 0, 220}
-                                                  : (hovRebind[ki] ? Clay_Color{50, 60, 100, 220} : Clay_Color{28, 30, 55, 200});
+                                                  ? Pal::listenBtn
+                                                  : (hovRebind[ki] ? Pal::btnHover : Pal::btnIdle);
                         CLAY(CLAY_IDI("KbRebind", ki), {.layout = {
                                                             .sizing = {CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(20)},
                                                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -962,7 +998,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                 kb.listening = true;
                             }
                             CLAY_TEXT(kb.listening ? CLAY_STRING("PRESS KEY") : CLAY_STRING("Rebind"),
-                                      CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = fs(10)}));
+                                      CLAY_TEXT_CONFIG({.textColor = Pal::btnLabel, .fontSize = fs(10)}));
                         }
                     }
                 }
@@ -971,21 +1007,21 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                 CLAY(CLAY_ID("CamCtrlSep"), {.layout = {
                                                  .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
                                                  .padding = {0, 0, 6, 4}},
-                                             .backgroundColor = {40, 50, 80, 120}}) {}
+                                             .backgroundColor = Pal::sectionHdr}) {}
                 CLAY_TEXT(CLAY_STRING("Camera"),
-                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = fs(14)}));
+                          CLAY_TEXT_CONFIG({.textColor = Pal::textSection, .fontSize = fs(14)}));
                 CLAY_TEXT(CLAY_STRING("Right-click drag   Look around"),
-                          CLAY_TEXT_CONFIG({.textColor = {110, 130, 160, 180}, .fontSize = fs(12)}));
+                          CLAY_TEXT_CONFIG({.textColor = Pal::textCamera, .fontSize = fs(12)}));
                 CLAY_TEXT(CLAY_STRING("Scroll wheel        Zoom (FOV)"),
-                          CLAY_TEXT_CONFIG({.textColor = {110, 130, 160, 180}, .fontSize = fs(12)}));
+                          CLAY_TEXT_CONFIG({.textColor = Pal::textCamera, .fontSize = fs(12)}));
 
                 // ── UI Scale ──────────────────────────────────────────────────
                 CLAY(CLAY_ID("UiScaleSep"), {.layout = {
                                                  .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
                                                  .padding = {0, 0, 6, 4}},
-                                             .backgroundColor = {40, 50, 80, 120}}) {}
+                                             .backgroundColor = Pal::sectionHdr}) {}
                 CLAY_TEXT(CLAY_STRING("Display"),
-                          CLAY_TEXT_CONFIG({.textColor = {150, 170, 210, 200}, .fontSize = fs(14)}));
+                          CLAY_TEXT_CONFIG({.textColor = Pal::textSection, .fontSize = fs(14)}));
 
                 CLAY(CLAY_ID("UiScaleRow"), {.layout = {
                                                  .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28)},
@@ -995,13 +1031,13 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                  .layoutDirection = CLAY_LEFT_TO_RIGHT}})
                 {
                     CLAY_TEXT(CLAY_STRING("Text scale"),
-                              CLAY_TEXT_CONFIG({.textColor = {180, 200, 240, 220}, .fontSize = fs(13)}));
+                              CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(13)}));
 
                     // Spacer
                     CLAY(CLAY_ID("UiScaleSpacer"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
 
                     // − button
-                    Clay_Color scaleMinusBg = hovScaleMinus ? Clay_Color{60, 70, 120, 220} : Clay_Color{28, 30, 55, 200};
+                    Clay_Color scaleMinusBg = hovScaleMinus ? Pal::btnHover : Pal::btnIdle;
                     CLAY(CLAY_ID("UiScaleMinus"), {.layout = {
                                                        .sizing = {CLAY_SIZING_FIXED(22), CLAY_SIZING_FIXED(22)},
                                                        .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -1016,7 +1052,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                         }
                         if (hovScaleMinus && inp.lmbPressed)
                             uiScale = std::max(0.75f, uiScale - 0.125f);
-                        CLAY_TEXT(CLAY_STRING("-"), CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = fs(13)}));
+                        CLAY_TEXT(CLAY_STRING("-"), CLAY_TEXT_CONFIG({.textColor = Pal::btnLabel, .fontSize = fs(13)}));
                     }
 
                     // Scale readout
@@ -1027,11 +1063,11 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                      .sizing = {CLAY_SIZING_FIXED(44), CLAY_SIZING_FIT(0)},
                                                      .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
                     {
-                        CLAY_TEXT(scaleStr, CLAY_TEXT_CONFIG({.textColor = {210, 230, 190, 255}, .fontSize = fs(13)}));
+                        CLAY_TEXT(scaleStr, CLAY_TEXT_CONFIG({.textColor = Pal::volValue, .fontSize = fs(13)}));
                     }
 
                     // + button
-                    Clay_Color scalePlusBg = hovScalePlus ? Clay_Color{60, 70, 120, 220} : Clay_Color{28, 30, 55, 200};
+                    Clay_Color scalePlusBg = hovScalePlus ? Pal::btnHover : Pal::btnIdle;
                     CLAY(CLAY_ID("UiScalePlus"), {.layout = {
                                                       .sizing = {CLAY_SIZING_FIXED(22), CLAY_SIZING_FIXED(22)},
                                                       .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -1046,7 +1082,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                         }
                         if (hovScalePlus && inp.lmbPressed)
                             uiScale = std::min(2.0f, uiScale + 0.125f);
-                        CLAY_TEXT(CLAY_STRING("+"), CLAY_TEXT_CONFIG({.textColor = {210, 220, 255, 255}, .fontSize = fs(13)}));
+                        CLAY_TEXT(CLAY_STRING("+"), CLAY_TEXT_CONFIG({.textColor = Pal::btnLabel, .fontSize = fs(13)}));
                     }
                 }
             }
@@ -1061,6 +1097,95 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
         ui.addMouseCaptureRect((inp.screenW - 500.0f) * 0.5f,
                                (inp.screenH - 500.0f) * 0.5f,
                                500.0f, 500.0f); // settings window
+
+    // ── Cinematic intro overlay ───────────────────────────────────────────────
+    if (showIntro)
+    {
+        if (inp.lmbPressed || inp.rmbPressed)
+            showIntro = false;
+        ui.addMouseCaptureRect(0, 0, inp.screenW, inp.screenH);
+
+        CLAY(CLAY_ID("IntroOverlay"), {.layout = {
+                                           .sizing = {CLAY_SIZING_FIXED((float)inp.screenW),
+                                                      CLAY_SIZING_FIXED((float)inp.screenH)},
+                                           .childAlignment = {.x = CLAY_ALIGN_X_CENTER,
+                                                              .y = CLAY_ALIGN_Y_CENTER},
+                                           .layoutDirection = CLAY_TOP_TO_BOTTOM},
+                                       .backgroundColor = {0, 0, 0, 185},
+                                       .floating = {.zIndex = 30, .attachTo = CLAY_ATTACH_TO_ROOT}})
+        {
+            CLAY(CLAY_ID("IntroPanel"), {.layout = {
+                                             .sizing = {CLAY_SIZING_FIXED(660),
+                                                        CLAY_SIZING_FIT(0)},
+                                             .childGap = 0,
+                                             .layoutDirection = CLAY_TOP_TO_BOTTOM}})
+            {
+                // ── Title ─────────────────────────────────────────────────────
+                CLAY_TEXT(CLAY_STRING("Welcome to the future!"),
+                          CLAY_TEXT_CONFIG({.textColor = {255, 255, 255, 255},
+                                            .fontSize = fs(34)}));
+
+                CLAY(CLAY_ID("IP1"), {.layout = {.sizing = {CLAY_SIZING_FIXED(1),
+                                                            CLAY_SIZING_FIXED(22)}}}) {}
+
+                // ── Body ──────────────────────────────────────────────────────
+                CLAY(CLAY_ID("IntroBody"), {.layout = {
+                                                .sizing = {CLAY_SIZING_FIXED(660), CLAY_SIZING_FIT(0)},
+                                                .childGap = 14,
+                                                .layoutDirection = CLAY_TOP_TO_BOTTOM}})
+                {
+                    CLAY_TEXT(CLAY_STRING("Every planned major space constellation has been constructed."),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(18)}));
+                    CLAY_TEXT(CLAY_STRING("Perpetual solar power lies in sun synchronous orbit, which has become competitive real estate for football field-sized space datacenters"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(18)}));
+                    CLAY_TEXT(CLAY_STRING(
+                                  "Whether or not they are profitable, useful, or even still functional, "
+                                  "they are going to be up there for a very long time."),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(18)}));
+                    CLAY_TEXT(CLAY_STRING("We will come to miss the quiet sky."),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(18)}));
+                }
+
+                CLAY(CLAY_ID("IP2"), {.layout = {.sizing = {CLAY_SIZING_FIXED(1),
+                                                            CLAY_SIZING_FIXED(48)}}}) {}
+
+                // ── Controls ──────────────────────────────────────────────────
+                CLAY(CLAY_ID("IntroControls"), {.layout = {
+                                                    .sizing = {CLAY_SIZING_FIXED(660),
+                                                               CLAY_SIZING_FIT(0)},
+                                                    .childGap = 7,
+                                                    .layoutDirection = CLAY_TOP_TO_BOTTOM}})
+                {
+                    CLAY_TEXT(CLAY_STRING("WASD  =  Move"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textSection,
+                                                .fontSize = fs(13)}));
+                    CLAY_TEXT(CLAY_STRING("Right click  =  Look"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textSection,
+                                                .fontSize = fs(13)}));
+                    CLAY_TEXT(CLAY_STRING("Shift  =  Boost"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textSection,
+                                                .fontSize = fs(13)}));
+                    CLAY_TEXT(CLAY_STRING("Space  =  Play / Pause"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textSection,
+                                                .fontSize = fs(13)}));
+                    CLAY_TEXT(CLAY_STRING("Comma  =  Slow down time"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textSection,
+                                                .fontSize = fs(13)}));
+                    CLAY_TEXT(CLAY_STRING("Period  =  Speed up time"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textSection,
+                                                .fontSize = fs(13)}));
+                }
+
+                CLAY(CLAY_ID("IP3"), {.layout = {.sizing = {CLAY_SIZING_FIXED(1),
+                                                            CLAY_SIZING_FIXED(32)}}}) {}
+
+                // ── Dismiss hint ──────────────────────────────────────────────
+                CLAY_TEXT(CLAY_STRING("Click or press any key to continue"),
+                          CLAY_TEXT_CONFIG({.textColor = Pal::textHint,
+                                            .fontSize = fs(11)}));
+            }
+        }
+    }
 }
 
 // ─── setAudio ─────────────────────────────────────────────────────────────────
@@ -1118,6 +1243,12 @@ void SatelliteSim::onKey(GLFWwindow *w, int key, int action)
     win = w;
     if (action != GLFW_PRESS)
         return;
+
+    if (showIntro)
+    {
+        showIntro = false;
+        return;
+    }
 
     // If any binding is listening, capture this key press and assign it.
     for (auto &kb : keybindings)
@@ -1728,11 +1859,11 @@ void SatelliteSim::initConstellation()
          "ISS",
          {1.00f, 0.85f, 0.70f}, // warm golden (solar array color)
          250.0f,
-         {AttitudeMode::SunTracking, 8.0f, 1.00f}, // truss-mounted solar arrays
-         {AttitudeMode::AntiNadir, 4.0f, 0.35f},   // large radiator panels (ITS) face deep space
-         0.04f,                                    // complex truss/module body
-         0.15f},                                   // mirrorFrac: highly polished solar panel glass → mag ~-7.5 at peak
-        {                                          // 4 — SpaceX ODC (FCC filing Jan 2026): Starlink-class bus with large radiator panels
+         {AttitudeMode::SunTracking, 12.0f, 1.00f}, // truss-mounted solar arrays
+         {AttitudeMode::AntiNadir, 4.0f, 0.35f},    // large radiator panels (ITS) face deep space
+         0.04f,                                     // complex truss/module body
+         0.05f},                                    // mirrorFrac: highly polished solar panel glass → mag ~-7.5 at peak
+        {                                           // 4 — SpaceX ODC (FCC filing Jan 2026): Starlink-class bus with large radiator panels
          // for compute heat rejection. Nadir-pointing phased array + deep-space-facing radiators.
          // Flat compute/antenna face produces brief nadir flares; radiator face brightens near
          // the horizon (AntiNadir face tilts toward the observer as satellite descends).
@@ -1795,7 +1926,7 @@ void SatelliteSim::initConstellation()
          OrbitDistribution::Walker},
 
         // Amazon Kuiper — FCC filing: 7,774 sats; 98 planes × 79 = 7,742
-        {"Kuiper",
+        {"Amazon LEO",
          630'000.0f,          // altM:      630 km
          glm::radians(51.9f), // incl:      51.9°
          98,                  // numPlanes: orbital planes
@@ -1812,16 +1943,6 @@ void SatelliteSim::initConstellation()
          174,                 // perPlane:  sats per plane (80×174 = 13,920)
          1u,                  // typeIdx:   LEO Broadband (SunTracking)
          true,                // enabled
-         OrbitDistribution::Walker},
-
-        // Telesat Lightspeed — planned: 1,671 sats; 27 planes × 62 = 1,674
-        {"Telesat",
-         1'015'000.0f,         // altM:      1,015 km
-         glm::radians(98.98f), // incl:      98.98° — sun-synchronous Walker
-         27,                   // numPlanes: orbital planes
-         62,                   // perPlane:  sats per plane (27×62 = 1,674)
-         1u,                   // typeIdx:   LEO Broadband (SunTracking)
-         true,                 // enabled
          OrbitDistribution::Walker},
 
         // GEO commercial belt — representative sample of operational comsats
@@ -2047,7 +2168,12 @@ void SatelliteSim::updatePositions(double t)
     // Period: 27.3217 days. The moon orbits in the ecliptic plane (~5° tilt);
     // for rendering purposes an equatorial approximation is sufficient.
     static constexpr double kMoonPeriodSec = 27.3217 * 86400.0;
-    double moonAngle = fmod(2.0 * glm::pi<double>() * t / kMoonPeriodSec,
+    // Phase offset calibrated so the moon is 91% illuminated (waxing gibbous) at the
+    // fixed sim start epoch 2026-03-30 05:53:58 UTC (t=828121038 J2000 s).
+    // Derived: sun at ecliptic lon ~14°, moon must be at ~158° for dot=-0.82.
+    // At t_start the bare formula gives ~294°; offset = 158°-294° = +224° = 3.916 rad.
+    static constexpr double kMoonPhaseOffsetRad = 3.916;
+    double moonAngle = fmod(2.0 * glm::pi<double>() * (t) / kMoonPeriodSec + kMoonPhaseOffsetRad,
                             glm::two_pi<double>());
     moonDirECI = glm::vec3{(float)cos(moonAngle), (float)sin(moonAngle), 0.0f};
 
@@ -2064,8 +2190,8 @@ void SatelliteSim::updatePositions(double t)
     // ── Per-constellation satellite geometry ──────────────────────────────────
     visibleCount = 0;
     peakMagnitude = 99.0f; // reset each frame; updated below for each visible sat
-    glowEntryCount    = 0;
-    glowMinIntensity  = 0.0f;
+    glowEntryCount = 0;
+    glowMinIntensity = 0.0f;
     for (const ConstellationConfig &c : constellations)
     {
         for (uint32_t i = c.orbitStart; i < c.orbitStart + c.orbitCount; ++i)
@@ -2222,10 +2348,10 @@ void SatelliteSim::updatePositions(double t)
                 glm::vec3 perpV = satECI_abs - proj * shadowDir;
                 float perpLen = glm::length(perpV);
                 float litF = (proj > 0.0f)
-                    ? glm::smoothstep(-kEarthRadius * 0.01f,
-                                       kEarthRadius * 0.01f,
-                                       perpLen - kEarthRadius)
-                    : 1.0f;
+                                 ? glm::smoothstep(-kEarthRadius * 0.01f,
+                                                   kEarthRadius * 0.01f,
+                                                   perpLen - kEarthRadius)
+                                 : 1.0f;
 
                 // Primary surface specular.
                 float irr0 = fabsf(glm::dot(sunDirECI, surfN0));
@@ -2233,11 +2359,12 @@ void SatelliteSim::updatePositions(double t)
                 glm::vec3 refl0 = glm::reflect(-sunDirECI, n0);
                 float cosR0 = std::max(0.0f, glm::dot(refl0, satToObs));
                 float spec0 = (type.primary.specExp < 0.01f)
-                    ? irr0 * std::max(0.0f, glm::dot(sunDirECI, satToObs))
-                    : irr0 * powf(cosR0, type.primary.specExp);
+                                  ? irr0 * std::max(0.0f, glm::dot(sunDirECI, satToObs))
+                                  : irr0 * powf(cosR0, type.primary.specExp);
 
                 // Mirror peak: only compute when near perfect alignment.
-                if (cosR0 > 0.9f && type.mirrorFrac > 0.0f) {
+                if (cosR0 > 0.9f && type.mirrorFrac > 0.0f)
+                {
                     float mExp = std::max(type.primary.specExp * 300.0f, 8000.0f);
                     spec0 += irr0 * powf(cosR0, mExp) * 300.0f * type.mirrorFrac;
                 }
@@ -2248,30 +2375,37 @@ void SatelliteSim::updatePositions(double t)
                 glm::vec3 refl1 = glm::reflect(-sunDirECI, n1);
                 float cosR1 = std::max(0.0f, glm::dot(refl1, satToObs));
                 float spec1 = (type.secondary.specExp < 0.01f)
-                    ? irr1 * std::max(0.0f, glm::dot(sunDirECI, satToObs))
-                    : irr1 * powf(cosR1, type.secondary.specExp);
+                                  ? irr1 * std::max(0.0f, glm::dot(sunDirECI, satToObs))
+                                  : irr1 * powf(cosR1, type.secondary.specExp);
 
                 float specular = spec0 + spec1 * type.secondary.weight + type.diffuse;
                 float flareSpec = specular * litF * distFactor * crossSection * kBrightnessScale;
                 float effectSpec = flareSpec / (1.0f + dayBright * kDaySuppression);
 
-                if (effectSpec > 0.5f) {
+                if (effectSpec > 0.5f)
+                {
                     glm::vec4 entry{glm::normalize(glm::vec3(
-                        glm::dot(relPos, east),
-                        glm::dot(relPos, north),
-                        glm::dot(relPos, up))), effectSpec};
-                    if (glowEntryCount < kMaxGlows) {
+                                        glm::dot(relPos, east),
+                                        glm::dot(relPos, north),
+                                        glm::dot(relPos, up))),
+                                    effectSpec};
+                    if (glowEntryCount < kMaxGlows)
+                    {
                         glowEntries[glowEntryCount++] = entry;
-                        if (glowEntryCount == kMaxGlows) {
+                        if (glowEntryCount == kMaxGlows)
+                        {
                             glowMinIntensity = FLT_MAX;
                             for (int gi = 0; gi < kMaxGlows; ++gi)
                                 glowMinIntensity = std::min(glowMinIntensity, glowEntries[gi].w);
                         }
-                    } else if (effectSpec > glowMinIntensity) {
+                    }
+                    else if (effectSpec > glowMinIntensity)
+                    {
                         // Replace the weakest entry.
                         int minIdx = 0;
                         for (int gi = 1; gi < kMaxGlows; ++gi)
-                            if (glowEntries[gi].w < glowEntries[minIdx].w) minIdx = gi;
+                            if (glowEntries[gi].w < glowEntries[minIdx].w)
+                                minIdx = gi;
                         glowEntries[minIdx] = entry;
                         glowMinIntensity = FLT_MAX;
                         for (int gi = 0; gi < kMaxGlows; ++gi)

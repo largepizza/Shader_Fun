@@ -158,22 +158,22 @@ static_assert(sizeof(SatFlarePC) == 80, "SatFlarePC layout mismatch");
 //   total: 112 bytes
 struct SatDrawPC
 {
-    glm::mat4 skyView;     // ENU → camera space
-    float fovYRad;         // vertical field of view (radians)
-    float aspect;          // viewport width / height
-    float pad[2];          // pad to 16-byte boundary before sunDirENU
-    glm::vec4 sunDirENU;   // sun direction in ENU (xyz unit vec, w = sin(elevation))
-    glm::vec4 moonDirENU;  // moon direction in ENU (xyz unit vec, w = illuminated fraction)
+    glm::mat4 skyView;    // ENU → camera space
+    float fovYRad;        // vertical field of view (radians)
+    float aspect;         // viewport width / height
+    float pad[2];         // pad to 16-byte boundary before sunDirENU
+    glm::vec4 sunDirENU;  // sun direction in ENU (xyz unit vec, w = sin(elevation))
+    glm::vec4 moonDirENU; // moon direction in ENU (xyz unit vec, w = illuminated fraction)
 }; // total: 112 bytes
 static_assert(sizeof(SatDrawPC) == 112, "SatDrawPC layout mismatch");
 
 // Per-frame satellite sky glow: top-N brightest flares written to a small SSBO.
 // std430 layout: int count + 3-float pad + 16 × vec4 (xyz=ENU dir, w=effectFlare).
-static constexpr int kMaxGlows = 16;
+static constexpr int kMaxGlows = 64;
 struct GpuGlowBuf
 {
-    int32_t   count;
-    float     pad[3];
+    int32_t count;
+    float pad[3];
     glm::vec4 entries[kMaxGlows]; // xyz = ENU unit dir, w = effectFlare intensity
 };
 
@@ -310,13 +310,15 @@ private:
     float timeDir = 1.0f; // +1 = forward, -1 = reverse
     // Observer position/facing in Earth-fixed ECEF — canonical movement state.
     // obsLatDeg / obsLonDeg are display caches derived each frame; camera.azDeg is also derived.
-    // Initial: lat=37°N lon=0°, facing north.
-    //   obsDir    = (cos37°, 0, sin37°)       ≈ (0.7986, 0, 0.6018)
-    //   obsFacing = north at that pos          ≈ (-0.6018, 0, 0.7986)
-    glm::vec3 obsDir = {0.7986f, 0.0f, 0.6018f};     // unit position vector
-    glm::vec3 obsFacing = {-0.6018f, 0.0f, 0.7986f}; // unit tangent (forward direction)
-    float obsLatDeg = 37.0f;                         // display cache — derived from obsDir
-    float obsLonDeg = 0.0f;                          // display cache — derived from obsDir
+    // Initial: lat=67°S lon=67°W, facing north.
+    //   obsDir    = (cos(-67°)cos(-67°), cos(-67°)sin(-67°), sin(-67°))
+    //             ≈ (0.1527, -0.3596, -0.9205)
+    //   obsFacing = (-sin(-67°)cos(-67°), -sin(-67°)sin(-67°), cos(-67°))
+    //             ≈ (0.3596, -0.8473, 0.3907)
+    glm::vec3 obsDir = {0.1527f, -0.3596f, -0.9205f}; // unit position vector
+    glm::vec3 obsFacing = {1, 0, 0};                  // unit tangent (forward direction, north)
+    float obsLatDeg = -67.0f;                         // display cache — derived from obsDir
+    float obsLonDeg = -67.0f;                         // display cache — derived from obsDir
     uint32_t activeSatCount = 0;
     uint32_t visibleCount = 0;
     float peakMagnitude = 99.0f; // brightest steady-state sat magnitude this frame
@@ -324,26 +326,27 @@ private:
     // ── Sky glow: top-N brightest flares ──────────────────────────────────────
     // Collected by updatePositions(); uploaded to glowBuf each frame.
     // The sky shader sums Gaussian contributions from all N entries.
-    glm::vec4 glowEntries[kMaxGlows]{};   // xyz = ENU unit dir, w = effectFlare
-    int       glowEntryCount = 0;
-    float     glowMinIntensity = 0.0f;    // min intensity in glowEntries (for efficient replacement)
-    VkBuffer       glowBuf    = VK_NULL_HANDLE;
-    VkDeviceMemory glowMem    = VK_NULL_HANDLE;
-    void*          glowMapped = nullptr;
+    glm::vec4 glowEntries[kMaxGlows]{}; // xyz = ENU unit dir, w = effectFlare
+    int glowEntryCount = 0;
+    float glowMinIntensity = 0.0f; // min intensity in glowEntries (for efficient replacement)
+    VkBuffer glowBuf = VK_NULL_HANDLE;
+    VkDeviceMemory glowMem = VK_NULL_HANDLE;
+    void *glowMapped = nullptr;
     VkDescriptorSetLayout skyDescLayout = VK_NULL_HANDLE;
-    VkDescriptorPool      skyDescPool   = VK_NULL_HANDLE;
-    VkDescriptorSet       skyDescSet    = VK_NULL_HANDLE;
+    VkDescriptorPool skyDescPool = VK_NULL_HANDLE;
+    VkDescriptorSet skyDescSet = VK_NULL_HANDLE;
 
     // ── UI visibility & settings ──────────────────────────────────────────────
+    bool showIntro = true; // cinematic intro overlay; dismissed on click or any key
     bool uiVisible = true;
     bool settingsOpen = false;
     bool iconsLoaded = false;
-    float uiScale    = 1.5f;          // text/UI size multiplier (0.75 – 2.0)
-    float masterVol_ = 0.8f;          // mirrors AudioSystem default (display fallback)
-    float musicVol_  = 0.6f;
-    float sfxVol_    = 1.0f;
-    VulkanContext *ctx_   = nullptr;  // set in init(), used for lazy icon loading
-    AudioSystem   *audio_ = nullptr;  // set via setAudio(), used in buildUI()
+    float uiScale = 1.5f;    // text/UI size multiplier (0.75 – 2.0)
+    float masterVol_ = 0.8f; // mirrors AudioSystem default (display fallback)
+    float musicVol_ = 0.6f;
+    float sfxVol_ = 1.0f;
+    VulkanContext *ctx_ = nullptr; // set in init(), used for lazy icon loading
+    AudioSystem *audio_ = nullptr; // set via setAudio(), used in buildUI()
 
     // ── Key bindings (editable in the settings window) ────────────────────────
     struct KeyBinding
@@ -388,15 +391,15 @@ private:
     bool hovLatNorth = false;
     bool hovSettings = false;
     bool hovSettingsClose = false;
-    bool hovScaleMinus      = false;
-    bool hovScalePlus       = false;
-    bool hovMasterVolMinus  = false;
-    bool hovMasterVolPlus   = false;
-    bool hovMusicVolMinus   = false;
-    bool hovMusicVolPlus    = false;
-    bool hovSfxVolMinus     = false;
-    bool hovSfxVolPlus      = false;
-    bool hovRebind[8]       = {}; // per keybinding row
+    bool hovScaleMinus = false;
+    bool hovScalePlus = false;
+    bool hovMasterVolMinus = false;
+    bool hovMasterVolPlus = false;
+    bool hovMusicVolMinus = false;
+    bool hovMusicVolPlus = false;
+    bool hovSfxVolMinus = false;
+    bool hovSfxVolPlus = false;
+    bool hovRebind[8] = {}; // per keybinding row
 
     // ── Private helpers ───────────────────────────────────────────────────────
     void createBuffers(VulkanContext &ctx);
@@ -413,6 +416,7 @@ private:
 };
 
 // Time scale options (simulated seconds per real second)
-static constexpr float kTimeScales[] = {1.0f, 60.0f, 300.0f, 3600.0f, 86400.0f};
-static constexpr const char *kTimeLabels[] = {"1x", "1m", "5m", "1h", "1d"};
-static constexpr int kNumTimeScales = 5;
+static constexpr float kTimeScales[] = {1.0f, 60.0f, 300.0f, 3600.0f, 86400.0f,
+                                        86400.0f * 7.0f, 86400.0f * 30.0f, 86400.0f * 365.0f};
+static constexpr const char *kTimeLabels[] = {"1x", "1m", "5m", "1h", "1d", "1w", "1mo", "1yr"};
+static constexpr int kNumTimeScales = 8;

@@ -291,7 +291,7 @@ void main() {
     // ── Point size: grows with flare intensity; capped to avoid giant sprites ─
     float rangeMm  = sat.range / 1.0e6;
     float baseSize = max(1.5, 2.5 - rangeMm * 0.4);
-    float angSize  = baseSize + effectFlare * 54.0;
+    float angSize  = baseSize * 2.5 + 10 * log(effectFlare * 54.0);
 
     // ── Output ───────────────────────────────────────────────────────────────
     visible[idx].skyDir         = skyDir;
