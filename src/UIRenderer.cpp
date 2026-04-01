@@ -838,7 +838,7 @@ void UIRenderer::record(VkCommandBuffer cmd, VulkanContext& ctx) {
     VkRect2D fullScissor{ {0, 0}, ctx.swapExtent };
     vkCmdSetScissor(cmd, 0, 1, &fullScissor);
 
-    Clay_RenderCommandArray cmds = Clay_EndLayout();
+    Clay_RenderCommandArray cmds = Clay_EndLayout(frameInput.dt);
 
     for (int32_t i = 0; i < cmds.length; ++i) {
         Clay_RenderCommand* rc = Clay_RenderCommandArray_Get(&cmds, i);

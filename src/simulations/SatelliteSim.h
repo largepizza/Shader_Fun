@@ -168,7 +168,8 @@ struct SatDrawPC
 static_assert(sizeof(SatDrawPC) == 112, "SatDrawPC layout mismatch");
 
 // Per-frame satellite sky glow: top-N brightest flares written to a small SSBO.
-// std430 layout: int count + 3-float pad + 16 × vec4 (xyz=ENU dir, w=effectFlare).
+// std430 layout: int count + 3-float pad + N × vec4 (xyz=ENU dir, w=effectFlare).
+// kMaxGlows must match the array size declared in sat_sky.frag.
 static constexpr int kMaxGlows = 64;
 struct GpuGlowBuf
 {
@@ -335,6 +336,11 @@ private:
     VkDescriptorSetLayout skyDescLayout = VK_NULL_HANDLE;
     VkDescriptorPool skyDescPool = VK_NULL_HANDLE;
     VkDescriptorSet skyDescSet = VK_NULL_HANDLE;
+    // Noise texture (binding 1): RGBA PNG tiled for lens-flare angular corona variation.
+    VkImage noiseTex = VK_NULL_HANDLE;
+    VkDeviceMemory noiseTexMem = VK_NULL_HANDLE;
+    VkImageView noiseTexView = VK_NULL_HANDLE;
+    VkSampler noiseSampler = VK_NULL_HANDLE;
 
     // ── UI visibility & settings ──────────────────────────────────────────────
     bool showIntro = true; // cinematic intro overlay; dismissed on click or any key

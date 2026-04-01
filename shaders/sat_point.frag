@@ -1,34 +1,28 @@
 // ── sat_point.frag ────────────────────────────────────────────────────────────
-// Point-sprite fragment shader for satellite and star rendering.
+// Point-sprite fragment shader for satellite rendering.
 //
-// Each visible satellite is drawn as one point primitive whose size was set by
-// the vertex shader from GpuSatVisible.angularSize (computed in sat_flare.comp).
-// gl_PointCoord covers [0,1]×[0,1] across that sprite quad.
+// This shader deliberately handles ONLY the tight unresolved core of each
+// satellite point source.  Camera-style lens flare effects for bright satellites
+// are rendered separately in sat_sky.frag using the glowBuf SSBO — that pass
+// runs first and draws into the sky/background layer.  This shader draws on top
+// of that (additive blend), anchoring the precise satellite position.
 //
-// Rendering model (three additive layers):
+// fragIntensity range: ~0 (invisible) to ~10+ (ISS-class event).
 //
-//   inner — tight Gaussian core (sigmaInner ≈ 4.5% of sprite radius).
-//           Always the brightest feature; represents the unresolved point source.
+// Two layers:
 //
-//   outer — soft bloom halo.  sigma grows from 0.10 (dim) to 0.35 (bright flare),
-//           feathered to zero at the sprite boundary so the circular clip edge is
-//           never visible regardless of intensity.
+//   inner — tight Gaussian pinpoint (sigmaInner = 4.5% of sprite radius).
+//           Log2 brightness compression prevents ISS-class objects from
+//           producing an oversized white blob; they still appear brighter than
+//           dim satellites but don't blow out.  The lens flare in sat_sky.frag
+//           is the primary "this is a very bright object" signal.
 //
-//   spike — diffraction spike cross (+).  Only appears when effectFlare > 0.30.
-//           spikeK=10000 → sub-pixel perpendicular width (needle-thin arms).
-//           spikeRK=3    → slow radial falloff; arms stay bright to d≈0.35.
-//           spikeFade    → dissolves arms into the halo before the disc edge.
+//   halo  — very soft, dim Gaussian envelope (sigma = 13% of sprite radius).
+//           Provides anti-aliased feathering so dim dots don't look like hard
+//           pixel squares.  Brightness is tightly capped so it stays invisible
+//           on bright objects (lens flare handles bloom there).
 //
-// Performance note:
-//   Each fragment evaluates 2–3 exp() calls.  With N visible sats each sporting
-//   a large sprite (angSize up to ~57 px radius), fragment work scales as
-//   O(N × sprite_area).  Above ~10k simultaneously visible bright satellites the
-//   total invocation count can saturate the GPU and trigger a Windows TDR crash.
-//   Reduce the `effectFlare * 54.0` sprite-growth coefficient in sat_flare.comp
-//   or add a LOD branch (skip spikes when fragIntensity < 0.5) to mitigate this.
-//
-// All layers are combined additively and written as (rgb*brightness, brightness)
-// so the pipeline's additive blend mode accumulates them correctly.
+// Output is (rgb*brightness, brightness) for additive blend accumulation.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #version 450
@@ -40,41 +34,49 @@ layout(location = 0) out vec4 outColor;
 
 void main() {
     // gl_PointCoord is [0,1] across the point sprite quad.
+    // c is centered at (0,0); d is distance from centre.
     vec2  c = gl_PointCoord - 0.5;
     float d = length(c);
 
     if (d > 0.5) discard;
 
-    // ── Inner glow: tight pinpoint core, fixed size in sprite-space ───────────────
-    // sigmaInner is intentionally small so the core stays compact even at large
-    // sprite sizes.  At sigma=0.045, the half-power radius is ~7% of the sprite.
-    // Brightness scales with intensity so it is always the brightest feature.
+    // ── Inner core: tight pinpoint, log-compressed brightness ─────────────────
+    //
+    // sigmaInner = 0.045:
+    //   Core radius is 4.5% of sprite half-width.  At a typical 30 px sprite
+    //   this is only a 1-2 px radius -- indistinguishable from a true point
+    //   source.  Fixed size so the core doesn't grow into a blob on bright sats.
+    //
+    // coreScale = 0.9 + log2(1 + intensity) * 0.45:
+    //   Calibrated so dim satellites (intensity~0) give coreScale~0.90, and
+    //   intensity=1 gives ~1.35.  Above that the log2 curve compresses:
+    //     intensity =  1 -> 1.35
+    //     intensity =  5 -> 1.94
+    //     intensity = 10 -> 2.32  (would be 5.2 with a linear multiplier)
+    //   The sat_sky.frag lens flare handles the "this is very bright" signal.
     const float sigmaInner = 0.045;
-    float inner = exp(-d * d / (2.0 * sigmaInner * sigmaInner))
-                  * (0.7 + fragIntensity * 0.1);
+    float coreScale = 0.9 + log2(1.0 + fragIntensity) * 0.45;
+    float inner = exp(-d * d / (2.0 * sigmaInner * sigmaInner)) * coreScale;
 
-    // ── Outer halo: soft bloom, grows with intensity, dimmer than core ────────────
-    // sigma grows from 0.10 (dim) to 0.35 (very bright flare).
-    // The feathering zone spans d=[0.10, 0.50] — 80% of the disc radius —
-    // so the circular sprite boundary is never visible regardless of glow size.
-    float sigmaOuter = 0.50 + clamp(fragIntensity * 0.10, 0.0, 0.25);
-    float outer = exp(-d * d / (2.0 * sigmaOuter * sigmaOuter))
-                  * clamp(fragIntensity * 0.5, 0.0, 0.7);
-    outer *= smoothstep(0.35, 0.10, d);
+    // ── Soft anti-aliasing halo: wide but very dim ─────────────────────────────
+    //
+    // sigmaHalo = 0.13:
+    //   Blurs the hard circular sprite boundary into a smooth taper.
+    //   Wide enough to feather cleanly; narrow enough to not look like bloom.
+    //
+    // haloScale cap at 0.20:
+    //   A dim satellite (intensity~0.3) gets just enough halo to look like a
+    //   round disc rather than a hard pixel square.  Bright satellites' halos
+    //   stay tiny -- the lens flare halos in sat_sky.frag dominate instead.
+    //
+    // smoothstep(0.50, 0.15, d):
+    //   Fade to zero in the outer 35% of the disc so the sprite boundary is
+    //   never visible even at large sprite sizes.
+    const float sigmaHalo = 0.13;
+    float haloScale = clamp(fragIntensity * 0.18, 0.0, 0.20);
+    float halo = exp(-d * d / (2.0 * sigmaHalo * sigmaHalo)) * haloScale;
+    halo *= smoothstep(0.50, 0.15, d);
 
-    // ── Diffraction spikes: thin cross with long smooth taper ─────────────────────
-    // spikeK=10000 → thinner needles (sub-pixel perpendicular width at typical sizes).
-    // spikeRK=3    → slow radial decay; arms remain at ≥68% peak through d=0.35.
-    // spikeFade    → soft clip over the outer 30% of disc radius so tips dissolve
-    //                into the halo rather than terminating at the circular boundary.
-    float spikeAmt  = clamp(fragIntensity - 0.30, 0.0, 1.5);
-    const float spikeK  = 10000.0;
-    const float spikeRK = 3.0;
-    float spikeRad  = exp(-d * d * spikeRK);
-    float spikeFade = smoothstep(0.50, 0.35, d);
-    float spike = (exp(-c.y * c.y * spikeK) + exp(-c.x * c.x * spikeK))
-                  * spikeRad * spikeFade * spikeAmt * 1.8;
-
-    float brightness = inner + outer + spike;
+    float brightness = inner + halo;
     outColor = vec4(fragColor * brightness, brightness);
 }

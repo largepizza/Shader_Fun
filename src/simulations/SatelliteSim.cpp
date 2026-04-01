@@ -3,6 +3,7 @@
 #include "../AudioSystem.h"
 #include "clay.h"
 #include "star_catalog.h"
+#include "stb_image.h"
 
 #include <chrono>
 #include <cmath>
@@ -1216,6 +1217,26 @@ void SatelliteSim::cleanup(VkDevice device)
     vkDestroyDescriptorPool(device, skyDescPool, nullptr);
     vkDestroyDescriptorSetLayout(device, skyDescLayout, nullptr);
     vkUnmapMemory(device, glowMem);
+    if (noiseSampler)
+    {
+        vkDestroySampler(device, noiseSampler, nullptr);
+        noiseSampler = VK_NULL_HANDLE;
+    }
+    if (noiseTexView)
+    {
+        vkDestroyImageView(device, noiseTexView, nullptr);
+        noiseTexView = VK_NULL_HANDLE;
+    }
+    if (noiseTex)
+    {
+        vkDestroyImage(device, noiseTex, nullptr);
+        noiseTex = VK_NULL_HANDLE;
+    }
+    if (noiseTexMem)
+    {
+        vkFreeMemory(device, noiseTexMem, nullptr);
+        noiseTexMem = VK_NULL_HANDLE;
+    }
     vkDestroyBuffer(device, glowBuf, nullptr);
     vkFreeMemory(device, glowMem, nullptr);
     vkUnmapMemory(device, satInputMem);
@@ -1391,6 +1412,7 @@ void SatelliteSim::createComputePipeline(VulkanContext &ctx)
 // and creates the descriptor set used by the sky background pipeline to read it.
 void SatelliteSim::createGlowResources(VulkanContext &ctx)
 {
+    // ── SSBO: top-N glow entries written every frame ──────────────────────────
     VkDeviceSize bufSize = sizeof(GpuGlowBuf);
     ctx.createBuffer(bufSize,
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -1399,17 +1421,92 @@ void SatelliteSim::createGlowResources(VulkanContext &ctx)
     vkMapMemory(ctx.device, glowMem, 0, bufSize, 0, &glowMapped);
     memset(glowMapped, 0, bufSize);
 
-    VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                                   VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    // ── Noise texture: RGBA PNG for lens-flare angular corona variation ────────
+    // Loaded from assets/noise/rgba_noise.png (tiled REPEAT sampler).
+    // The sky shader samples it at angular coordinates around each flare source
+    // to produce the irregular spiky corona shape (see lensFlare() in sat_sky.frag).
+    {
+        int w = 0, h = 0, ch = 0;
+        stbi_uc *pixels = stbi_load("assets/noise/rgba_noise.png", &w, &h, &ch, 4);
+        if (!pixels)
+            throw std::runtime_error("SatelliteSim: failed to load assets/noise/rgba_noise.png");
+
+        VkDeviceSize imgBytes = (VkDeviceSize)w * h * 4;
+
+        // Staging buffer
+        VkBuffer stageBuf;
+        VkDeviceMemory stageMem;
+        ctx.createBuffer(imgBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         stageBuf, stageMem);
+        void *mapped;
+        vkMapMemory(ctx.device, stageMem, 0, imgBytes, 0, &mapped);
+        memcpy(mapped, pixels, (size_t)imgBytes);
+        vkUnmapMemory(ctx.device, stageMem);
+        stbi_image_free(pixels);
+
+        // Device image
+        ctx.createImage((uint32_t)w, (uint32_t)h,
+                        VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                        noiseTex, noiseTexMem);
+
+        // Upload via one-time command
+        {
+            auto cmd = ctx.beginOneTimeCommands();
+            ctx.imageBarrier(cmd, noiseTex,
+                             0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            VkBufferImageCopy region{};
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
+            vkCmdCopyBufferToImage(cmd, stageBuf, noiseTex,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            ctx.imageBarrier(cmd, noiseTex,
+                             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            ctx.endOneTimeCommands(cmd);
+        }
+        vkDestroyBuffer(ctx.device, stageBuf, nullptr);
+        vkFreeMemory(ctx.device, stageMem, nullptr);
+
+        // Image view
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = noiseTex;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCreateImageView(ctx.device, &vci, nullptr, &noiseTexView);
+
+        // Sampler: REPEAT so the noise tiles seamlessly around the full angular range
+        VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sci.magFilter = VK_FILTER_LINEAR;
+        sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        vkCreateSampler(ctx.device, &sci, nullptr, &noiseSampler);
+    }
+
+    // ── Descriptor set layout: binding 0 = SSBO, binding 1 = noise sampler ────
+    VkDescriptorSetLayoutBinding bindings[2] = {};
+    bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    bindings[1] = {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 1;
-    li.pBindings = &b;
+    li.bindingCount = 2;
+    li.pBindings = bindings;
     vkCreateDescriptorSetLayout(ctx.device, &li, nullptr, &skyDescLayout);
 
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+    VkDescriptorPoolSize ps[2] = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
+    };
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pi.poolSizeCount = 1;
-    pi.pPoolSizes = &ps;
+    pi.poolSizeCount = 2;
+    pi.pPoolSizes = ps;
     pi.maxSets = 1;
     vkCreateDescriptorPool(ctx.device, &pi, nullptr, &skyDescPool);
 
@@ -1419,14 +1516,23 @@ void SatelliteSim::createGlowResources(VulkanContext &ctx)
     ai.pSetLayouts = &skyDescLayout;
     vkAllocateDescriptorSets(ctx.device, &ai, &skyDescSet);
 
-    VkDescriptorBufferInfo bi{glowBuf, 0, VK_WHOLE_SIZE};
-    VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    wr.dstSet = skyDescSet;
-    wr.dstBinding = 0;
-    wr.descriptorCount = 1;
-    wr.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    wr.pBufferInfo = &bi;
-    vkUpdateDescriptorSets(ctx.device, 1, &wr, 0, nullptr);
+    VkDescriptorBufferInfo bufInfo{glowBuf, 0, VK_WHOLE_SIZE};
+    VkDescriptorImageInfo imgInfo{noiseSampler, noiseTexView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+    VkWriteDescriptorSet writes[2] = {};
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = skyDescSet;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[0].pBufferInfo = &bufInfo;
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = skyDescSet;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[1].pImageInfo = &imgInfo;
+    vkUpdateDescriptorSets(ctx.device, 2, writes, 0, nullptr);
 }
 
 // Fullscreen triangle that colors pixels sky or ground based on camera elevation.
@@ -1945,16 +2051,6 @@ void SatelliteSim::initConstellation()
          true,                // enabled
          OrbitDistribution::Walker},
 
-        // GEO commercial belt — representative sample of operational comsats
-        {"GEO Belt",
-         35'786'000.0f,      // altM:      35,786 km (geostationary)
-         glm::radians(0.0f), // incl:      0° — equatorial
-         1,                  // numPlanes: single equatorial ring
-         50,                 // perPlane:  50 representative comsats
-         2u,                 // typeIdx:   GEO Comsat (SunTracking + AntiNadir radiators)
-         true,               // enabled
-         OrbitDistribution::Walker},
-
         // International Space Station — single object for visual reference
         {"ISS",
          408'000.0f,          // altM:      408 km
@@ -1977,11 +2073,11 @@ void SatelliteSim::initConstellation()
          4u,           // typeIdx:   SpaceX ODC (NadirPointing + AntiNadir radiators)
          true,         // enabled
          OrbitDistribution::Disk,
-         5000.0f,     // altJitterM:      no per-satellite altitude scatter
-         0.0f,        // raan:            ignored (alignTerminator=true)
-         true,        // alignTerminator: orbital plane = terminator plane (tracks Sun)
-         10,          // numRings:        10 concentric rings
-         150'000.0f}, // ringSpacingM:    150 km between rings (575–1,925 km range)
+         5000.0f,         // altJitterM:      no per-satellite altitude scatter
+         0.0f,            // raan:            ignored (alignTerminator=true)
+         true,            // alignTerminator: orbital plane = terminator plane (tracks Sun)
+         10 * 2,          // numRings:        10 concentric rings
+         150'000.0f / 2}, // ringSpacingM:    150 km between rings (575–1,925 km range)
     };
 
     // ── Populate satOrbits ────────────────────────────────────────────────────
