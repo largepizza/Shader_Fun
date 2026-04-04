@@ -2,6 +2,7 @@
 build/
 build-linux/
 out/
+ShaderFun-linux/
 
 # ── Compiled shaders (generated at build time from shaders/) ─────────────────
 *.spv
