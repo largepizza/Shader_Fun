@@ -14,21 +14,33 @@
 #include <cmath>
 
 // ── Maximum satellites per frame ──────────────────────────────────────────────
-static constexpr uint32_t MAX_SATELLITES = 100'000;
+static constexpr uint32_t MAX_SATELLITES = 200'000;
 
 // ── Satellite attitude model ───────────────────────────────────────────────────
 enum class AttitudeMode
 {
-    NadirPointing, // flat face toward Earth (Starlink bus/antenna) — brief intense flares
-    SunTracking,   // panel normal tracks sun for power — opposition flares
-    Tumbling,      // uncontrolled random tumble — chaotic flashes (debris)
-    Perpendicular, // 90° to primary surface in the nadir plane — along orbital track
-                   // (secondary only: normal = cross(surfN0, satNadir))
-    AntiNadir,     // facing away from Earth center — deep-space-pointing radiator panels
-                   // (secondary only: normal = -satNadir)
-                   // Brightest to observers at the satellite's horizon; nearly invisible
-                   // to observers directly beneath (at satellite's zenith), because the
-                   // radiator face points away from them toward cold space.
+    NadirPointing,     // flat face toward Earth (Starlink bus/antenna) — brief intense flares
+    SunTracking,       // panel normal tracks sun for power — opposition flares
+    Tumbling,          // uncontrolled random tumble — chaotic flashes (debris)
+    Perpendicular,     // 90° to primary surface in the nadir plane — along orbital track
+                       // (secondary only: normal = cross(surfN0, satNadir))
+    AntiNadir,         // facing away from Earth center — deep-space-pointing radiator panels
+                       // (secondary only: normal = -satNadir)
+                       // Brightest to observers at the satellite's horizon; nearly invisible
+                       // to observers directly beneath (at satellite's zenith), because the
+                       // radiator face points away from them toward cold space.
+    FlatMirror45,      // flat mirror oriented to reflect sunlight straight toward Earth center.
+                       // Normal = normalize(sunDir + satNadir) — bisects incoming sun and
+                       // outgoing nadir directions.  The reflected beam hits the ground below
+                       // the satellite; angle between mirror and nadir ≈ 45° when sun is
+                       // on the orbital horizon.  Models space-mirror illumination proposals
+                       // (e.g. Reflect Orbital 55m mirrors).
+    TargetedReflector, // as FlatMirror45 but aimed at a specific ground point on the terminator
+                       // rather than straight down.  Target parametrized by SatOrbit::targetTerminatorAngle
+                       // (radians along the terminator great-circle).  Each satellite's mirror
+                       // normal is: normalize(sunDir + toTarget), so that reflected sunlight
+                       // hits the chosen surface spot.  Multiple satellites sharing the same
+                       // angle converge their beams onto one ground location — focused illumination.
 };
 
 // ── Orbit distribution type ────────────────────────────────────────────────────
@@ -230,15 +242,19 @@ struct SkyCamera
 // ── Fixed orbital parameters (one per satellite, computed once at init) ───────
 struct SatOrbit
 {
-    float raan;           // right ascension of ascending node (radians)
-    float incl;           // inclination (radians) — per-satellite so RandomShell can vary
-    float u0;             // initial mean argument of latitude (radians)
-    uint32_t typeIdx;     // index into satTypes[]
-    float altM;           // orbital altitude above surface (meters) — per-satellite
-    float tumbleRate;     // rotation rate (rad/s); 0 = not tumbling
-    float tumblePhase;    // initial rotation angle (radians)
-    glm::vec3 tumbleAxis; // fixed body tumble axis (unit vector in ECI)
-    bool alignTerminator; // if true, incl/raan are recomputed from sunDirECI each frame
+    float raan;                         // right ascension of ascending node (radians)
+    float incl;                         // inclination (radians) — per-satellite so RandomShell can vary
+    float u0;                           // initial mean argument of latitude (radians)
+    uint32_t typeIdx;                   // index into satTypes[]
+    float altM;                         // orbital altitude above surface (meters) — per-satellite
+    float tumbleRate;                   // rotation rate (rad/s); 0 = not tumbling
+    float tumblePhase;                  // initial rotation angle (radians)
+    glm::vec3 tumbleAxis;               // fixed body tumble axis (unit vector in ECI)
+    bool alignTerminator;               // if true, incl/raan are recomputed from sunDirECI each frame
+    float targetTerminatorAngle = 0.0f; // TargetedReflector: angle (rad) along the terminator great-circle
+                                        // that selects the ground target this mirror aims at.
+                                        // Terminator basis: t1=cross(sunDir,ref), t2=cross(sunDir,t1).
+                                        // Target = kEarthRadius × (cos(angle)×t1 + sin(angle)×t2).
 };
 
 // ── SatelliteSim ──────────────────────────────────────────────────────────────
@@ -253,6 +269,7 @@ public:
     void recordDraw(VkCommandBuffer cmd, VulkanContext &ctx, float dt) override;
     void buildUI(float dt, UIRenderer &ui) override;
     void setAudio(AudioSystem *audio) override;
+    void setWindow(GLFWwindow *w) override { win = w; }
     VkClearValue clearColor() const override { return {{{0.0f, 0.0f, 0.015f, 1.0f}}}; }
     void cleanup(VkDevice device) override;
     void onKey(GLFWwindow *w, int key, int action) override;
@@ -355,13 +372,35 @@ private:
     AudioSystem *audio_ = nullptr; // set via setAudio(), used in buildUI()
 
     // ── Key bindings (editable in the settings window) ────────────────────────
+    // All interactive keys go here — both event keys (pressed once) and held keys
+    // (polled each frame).  Adding a new control is one line in the keybindings
+    // initializer; the settings window and rebind UI are driven entirely from this
+    // vector so no other plumbing is needed.
+    //
+    // held=false  → dispatched in onKey() via pressed(idx)
+    // held=true   → polled in recordCompute() via glfwGetKey(win, keybindings[idx].key)
     struct KeyBinding
     {
         const char *action;
-        int key;
+        int  key;
+        bool held      = false; // true = polled (held modifier), false = event (pressed once)
         bool listening = false;
     };
     std::vector<KeyBinding> keybindings;
+
+    // Canonical index constants — keeps onKey / recordCompute in sync with the
+    // keybindings array without magic numbers.
+    enum KB
+    {
+        KB_TOGGLE_UI   = 0,
+        KB_PAUSE       = 1,
+        KB_SLOWER      = 2,
+        KB_FASTER      = 3,
+        KB_REVERSE     = 4,
+        KB_MOVE_BOOST  = 5, // held
+        KB_MOVE_FINE   = 6, // held
+        KB_COUNT       = 7,
+    };
 
     // ── ECI → ENU rotation (updated each frame in updatePositions) ────────────
     // Encodes the surface-fixed observer's local frame in ECI coordinates.
@@ -374,6 +413,24 @@ private:
     glm::vec4 sunDirENU{0, 1, 0, 0}; // sun direction in ENU (xyz), w = sin(elevation)
     glm::vec3 obsECI{0, 0, 6371000}; // observer ECI position (meters)
 
+    // ── TargetedReflector ground targets ──────────────────────────────────────
+    // Random lat/lon points generated once at init as unit ECEF vectors.
+    // Rotated to ECI each frame in updatePositions; filtered to those on the
+    // night side within 30° of the terminator (usefully dark but reachable).
+    static constexpr int kNumReflectorTargets = 201;
+    glm::vec3 reflectorTargetsECEF[kNumReflectorTargets]{}; // unit ECEF, set by initConstellation
+
+    // Mirror slew rate for TargetedReflector: maximum degrees the mirror normal
+    // may rotate per real second.  Prevents instant snapping when the nearest
+    // valid target changes (e.g. a target crosses into daylight and a different
+    // one takes over).  The mirror physically slews toward the goal direction.
+    static constexpr float kMirrorRotRateDegPerSec = 1.0f;
+
+    // Per-satellite current mirror normal in ECI (TargetedReflector only).
+    // Persistent between frames; slews toward the ideal target normal at
+    // kMirrorRotRateDegPerSec.  Zero-vector = uninitialized (snaps on first frame).
+    std::vector<glm::vec3> satMirrorNormals;
+
     // ── Satellite type catalogue (defined once in initConstellation) ──────────
     std::vector<SatelliteType> satTypes;
 
@@ -382,8 +439,10 @@ private:
     std::vector<SatOrbit> satOrbits;
     std::vector<GpuSatInput> satInputData;
 
-    // ── Mouse state ───────────────────────────────────────────────────────────
+    // ── Mouse state / window handle ───────────────────────────────────────────
     GLFWwindow *win = nullptr;
+    int windowedX = 100, windowedY = 100;  // saved windowed position (for restore)
+    int windowedW = 1280, windowedH = 720; // saved windowed size (for restore)
     bool firstMouse = true;
     double prevX = 0, prevY = 0;
     float dmx = 0, dmy = 0; // accumulated delta for this frame
@@ -405,7 +464,8 @@ private:
     bool hovMusicVolPlus = false;
     bool hovSfxVolMinus = false;
     bool hovSfxVolPlus = false;
-    bool hovRebind[8] = {}; // per keybinding row
+    bool hovRebind[KB_COUNT] = {}; // per keybinding row — sized to match keybindings vector
+    bool hovFullscreen = false;
 
     // ── Private helpers ───────────────────────────────────────────────────────
     void createBuffers(VulkanContext &ctx);
@@ -417,8 +477,10 @@ private:
     void initStars(VulkanContext &ctx);
     void createStarPipeline(VulkanContext &ctx);
     void updateStars();
-    void initConstellation();       // called once: populates satOrbits
-    void updatePositions(double t); // called each frame: fills satInputData + eci2enu
+    void initConstellation();                        // called once: populates satOrbits
+    void updatePositions(double t, float dt = 0.0f); // called each frame: fills satInputData + eci2enu
+                                                     // dt = simulated seconds elapsed this frame (0 when paused);
+                                                     // used for mirror slew rate so behaviour is consistent at all time scales
 };
 
 // Time scale options (simulated seconds per real second)

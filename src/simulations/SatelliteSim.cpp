@@ -81,17 +81,23 @@ void SatelliteSim::init(VulkanContext &ctx)
     // Fixed start time: 2026-03-30 05:53:58 UTC
     // J2000.0 = 2000-01-01 12:00:00 UTC = Unix 946728000
     // 2026-03-30 05:53:58 UTC = Unix 1774849038
-    simTime = simTimeAtInit = 1774849038.0 - 946728000.0 + 11 * 3600; // 828121038 s from J2000
+    simTime = simTimeAtInit = 1774849038.0 - 946728000.0 + 11 * 3600 + 20 * 60; // 828121038 s from J2000
 
     ctx_ = &ctx;
 
+    // Order must match the KB_* enum in SatelliteSim.h.
+    // held=true  → polled every frame in recordCompute (modifier/held keys)
+    // held=false → fired once in onKey (toggle/event keys)
     keybindings = {
-        {"Toggle UI", GLFW_KEY_TAB, false},
-        {"Pause/Resume", GLFW_KEY_SPACE, false},
-        {"Slow Down", GLFW_KEY_COMMA, false},
-        {"Speed Up", GLFW_KEY_PERIOD, false},
-        {"Reverse Time", GLFW_KEY_R, false},
+        {"Toggle UI", GLFW_KEY_TAB, false, false},         // KB_TOGGLE_UI
+        {"Pause/Resume", GLFW_KEY_SPACE, false, false},    // KB_PAUSE
+        {"Slow Down", GLFW_KEY_COMMA, false, false},       // KB_SLOWER
+        {"Speed Up", GLFW_KEY_PERIOD, false, false},       // KB_FASTER
+        {"Reverse Time", GLFW_KEY_R, false, false},        // KB_REVERSE
+        {"Move Fast", GLFW_KEY_LEFT_SHIFT, true, false},   // KB_MOVE_BOOST (held)
+        {"Move Fine", GLFW_KEY_LEFT_CONTROL, true, false}, // KB_MOVE_FINE  (held)
     };
+    static_assert(KB_COUNT == 7, "KB enum and keybindings initializer are out of sync");
 
     createBuffers(ctx);
     createDescriptors(ctx);
@@ -133,8 +139,10 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
     // After each step obsFacing is parallel-transported to stay tangent at newPos.
     if (win)
     {
-        bool shift = glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
-        float speed = shift ? 0.5f : 0.08f; // radians of arc per real second
+        bool boost = win && glfwGetKey(win, keybindings[KB_MOVE_BOOST].key) == GLFW_PRESS;
+        bool fine = win && glfwGetKey(win, keybindings[KB_MOVE_FINE].key) == GLFW_PRESS;
+        float speed = boost ? 0.5f : fine ? 0.005f
+                                          : 0.08f; // boost = fast, fine = slow, default = normal
 
         float fwd = (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS ? 1.0f : 0.0f) - (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS ? 1.0f : 0.0f);
         float right = (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS ? 1.0f : 0.0f) - (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS ? 1.0f : 0.0f);
@@ -156,9 +164,10 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
         }
     }
 
+    float simDt = timePaused ? 0.0f : fabsf(dt * kTimeScales[timeScaleIdx]);
     if (!timePaused)
         simTime += (double)dt * kTimeScales[timeScaleIdx] * timeDir;
-    updatePositions(simTime);
+    updatePositions(simTime, simDt);
     updateStars();
 
     // Upload top-N glow entries to the sky shader's SSBO.
@@ -278,6 +287,84 @@ static const char *keyDisplayName(int key)
         return "Esc";
     case GLFW_KEY_ENTER:
         return "Enter";
+    case GLFW_KEY_LEFT_SHIFT:
+        return "LShift";
+    case GLFW_KEY_RIGHT_SHIFT:
+        return "RShift";
+    case GLFW_KEY_LEFT_CONTROL:
+        return "LCtrl";
+    case GLFW_KEY_RIGHT_CONTROL:
+        return "RCtrl";
+    case GLFW_KEY_LEFT_ALT:
+        return "LAlt";
+    case GLFW_KEY_RIGHT_ALT:
+        return "RAlt";
+    case GLFW_KEY_LEFT_SUPER:
+        return "LSuper";
+    case GLFW_KEY_RIGHT_SUPER:
+        return "RSuper";
+    case GLFW_KEY_F11:
+        return "F11";
+    case GLFW_KEY_F1:
+        return "F1";
+    case GLFW_KEY_F2:
+        return "F2";
+    case GLFW_KEY_F3:
+        return "F3";
+    case GLFW_KEY_F4:
+        return "F4";
+    case GLFW_KEY_F5:
+        return "F5";
+    case GLFW_KEY_F6:
+        return "F6";
+    case GLFW_KEY_F7:
+        return "F7";
+    case GLFW_KEY_F8:
+        return "F8";
+    case GLFW_KEY_F9:
+        return "F9";
+    case GLFW_KEY_F10:
+        return "F10";
+    case GLFW_KEY_F12:
+        return "F12";
+    case GLFW_KEY_UP:
+        return "Up";
+    case GLFW_KEY_DOWN:
+        return "Down";
+    case GLFW_KEY_LEFT:
+        return "Left";
+    case GLFW_KEY_RIGHT:
+        return "Right";
+    case GLFW_KEY_PAGE_UP:
+        return "PgUp";
+    case GLFW_KEY_PAGE_DOWN:
+        return "PgDn";
+    case GLFW_KEY_HOME:
+        return "Home";
+    case GLFW_KEY_END:
+        return "End";
+    case GLFW_KEY_INSERT:
+        return "Ins";
+    case GLFW_KEY_DELETE:
+        return "Del";
+    case GLFW_KEY_BACKSPACE:
+        return "Bksp";
+    case GLFW_KEY_SLASH:
+        return "/";
+    case GLFW_KEY_BACKSLASH:
+        return "\\";
+    case GLFW_KEY_SEMICOLON:
+        return ";";
+    case GLFW_KEY_APOSTROPHE:
+        return "'";
+    case GLFW_KEY_LEFT_BRACKET:
+        return "[";
+    case GLFW_KEY_RIGHT_BRACKET:
+        return "]";
+    case GLFW_KEY_MINUS:
+        return "-";
+    case GLFW_KEY_EQUAL:
+        return "=";
     default:
         if (key >= GLFW_KEY_A && key <= GLFW_KEY_Z)
         {
@@ -935,11 +1022,17 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                               .padding = {0, 0, 4, 4}},
                                           .backgroundColor = Pal::sectionHdr}) {}
 
-                // One row per keybinding
-                static char kbKeyBuf[8][16];
-                for (int ki = 0; ki < (int)keybindings.size() && ki < 8; ++ki)
+                // One row per keybinding — driven entirely from the keybindings vector.
+                // Adding a new KB_* entry and a keybindings[] initializer line is all
+                // that's needed; this loop and the rebind logic require no changes.
+                static char kbKeyBuf[KB_COUNT][16];
+                for (int ki = 0; ki < (int)keybindings.size() && ki < KB_COUNT; ++ki)
                 {
                     KeyBinding &kb = keybindings[ki];
+                    // Held keys show "(hold)" suffix so users know not to press-and-release.
+                    // if (kb.held)
+                    //     snprintf(kbKeyBuf[ki], sizeof(kbKeyBuf[ki]), "[%s] hold", keyDisplayName(kb.key));
+                    // else
                     snprintf(kbKeyBuf[ki], sizeof(kbKeyBuf[ki]), "[%s]", keyDisplayName(kb.key));
 
                     Clay_Color rowBg = kb.listening
@@ -980,7 +1073,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                   ? Pal::listenBtn
                                                   : (hovRebind[ki] ? Pal::btnHover : Pal::btnIdle);
                         CLAY(CLAY_IDI("KbRebind", ki), {.layout = {
-                                                            .sizing = {CLAY_SIZING_FIXED(80), CLAY_SIZING_FIXED(20)},
+                                                            .sizing = {CLAY_SIZING_FIXED(120), CLAY_SIZING_FIXED(20)},
                                                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
                                                         .backgroundColor = rebindBg,
                                                         .cornerRadius = CLAY_CORNER_RADIUS(3)})
@@ -1086,6 +1179,102 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                         CLAY_TEXT(CLAY_STRING("+"), CLAY_TEXT_CONFIG({.textColor = Pal::btnLabel, .fontSize = fs(13)}));
                     }
                 }
+
+                // ── Fullscreen toggle ─────────────────────────────────────────
+                bool isFs = win && glfwGetWindowMonitor(win) != nullptr;
+                CLAY(CLAY_ID("WinModeRow"), {.layout = {
+                                                 .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28)},
+                                                 .padding = {4, 4, 4, 4},
+                                                 .childGap = 8,
+                                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                                 .layoutDirection = CLAY_LEFT_TO_RIGHT}})
+                {
+                    CLAY_TEXT(CLAY_STRING("Window mode"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(13)}));
+                    CLAY(CLAY_ID("WinModeSpacer"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
+
+                    Clay_Color fsBg = isFs ? (hovFullscreen ? Pal::btnAccentHv : Pal::btnAccent)
+                                           : (hovFullscreen ? Pal::btnHover : Pal::btnIdle);
+                    CLAY(CLAY_ID("FsToggleBtn"), {.layout = {
+                                                      .sizing = {CLAY_SIZING_FIXED(92), CLAY_SIZING_FIXED(22)},
+                                                      .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                  .backgroundColor = fsBg,
+                                                  .cornerRadius = CLAY_CORNER_RADIUS(3)})
+                    {
+                        {
+                            bool n = Clay_Hovered();
+                            sndRollover(n, hovFullscreen);
+                            sndClick(n);
+                            hovFullscreen = n;
+                        }
+                        if (hovFullscreen && inp.lmbPressed && win)
+                        {
+                            if (!isFs)
+                            {
+                                glfwGetWindowPos(win, &windowedX, &windowedY);
+                                glfwGetWindowSize(win, &windowedW, &windowedH);
+                                GLFWmonitor *mon = glfwGetPrimaryMonitor();
+                                const GLFWvidmode *mode = glfwGetVideoMode(mon);
+                                glfwSetWindowMonitor(win, mon, 0, 0,
+                                                     mode->width, mode->height, mode->refreshRate);
+                            }
+                            else
+                            {
+                                glfwSetWindowMonitor(win, nullptr,
+                                                     windowedX, windowedY, windowedW, windowedH, 0);
+                            }
+                        }
+                        CLAY_TEXT(isFs ? CLAY_STRING("Windowed") : CLAY_STRING("Fullscreen"),
+                                  CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(11)}));
+                    }
+                }
+
+                // ── Attributions ──────────────────────────────────────────────
+                CLAY(CLAY_ID("AttrGap"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(8)}}}) {}
+                CLAY(CLAY_ID("AttrHdr"), {.layout = {
+                                              .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(22)},
+                                              .padding = {6, 6, 4, 4},
+                                              .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}},
+                                          .backgroundColor = Pal::sectionHdr})
+                {
+                    CLAY_TEXT(CLAY_STRING("Attributions"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textSection, .fontSize = fs(14)}));
+                }
+                CLAY(CLAY_ID("AttrSep"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                                      .padding = {0, 0, 4, 4}},
+                                           .backgroundColor = Pal::sectionHdr}) {}
+
+                // Row: constellation data source
+                CLAY(CLAY_ID("Attr0"), {.layout = {
+                                            .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                                            .padding = {6, 6, 5, 5},
+                                            .childGap = 4,
+                                            .layoutDirection = CLAY_TOP_TO_BOTTOM}})
+                {
+                    CLAY_TEXT(CLAY_STRING("Satellite constellation data"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(12)}));
+                    CLAY_TEXT(CLAY_STRING("planet4589.org/space/con/conlist.html"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textDim, .fontSize = fs(11)}));
+                }
+
+                CLAY(CLAY_ID("AttrDiv0"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                                       .padding = {0, 0, 2, 2}},
+                                            .backgroundColor = {30, 30, 32, 255}}) {}
+
+                // Row: lens flare shader
+                CLAY(CLAY_ID("Attr1"), {.layout = {
+                                            .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                                            .padding = {6, 6, 5, 5},
+                                            .childGap = 4,
+                                            .layoutDirection = CLAY_TOP_TO_BOTTOM}})
+                {
+                    CLAY_TEXT(CLAY_STRING("Lens Flare shader (modified)"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(12)}));
+                    CLAY_TEXT(CLAY_STRING("\"Lens Flare Example\" by peterekepeter"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textDim, .fontSize = fs(11)}));
+                    CLAY_TEXT(CLAY_STRING("shadertoy.com/view/4sX3Rs"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textHint, .fontSize = fs(11)}));
+                }
             }
         }
     }
@@ -1137,7 +1326,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                 {
                     CLAY_TEXT(CLAY_STRING("Every planned major space constellation has been constructed."),
                               CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(18)}));
-                    CLAY_TEXT(CLAY_STRING("Perpetual solar power lies in sun synchronous orbit, which has become competitive real estate for football field-sized space datacenters"),
+                    CLAY_TEXT(CLAY_STRING("Perpetual sunshine lies in sun synchronous orbit, following the terminator line of the Earth. This has become competitive real estate for football field-sized space datacenters and mirror reflectors"),
                               CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(18)}));
                     CLAY_TEXT(CLAY_STRING(
                                   "Whether or not they are profitable, useful, or even still functional, "
@@ -1294,16 +1483,35 @@ void SatelliteSim::onKey(GLFWwindow *w, int key, int action)
         return bindIdx < (int)keybindings.size() && key == keybindings[bindIdx].key;
     };
 
-    if (pressed(0))
-        uiVisible = !uiVisible; // Toggle UI
-    if (pressed(1))
-        timePaused = !timePaused; // Pause/Resume
-    if (pressed(2))
-        timeScaleIdx = std::max(0, timeScaleIdx - 1); // Slow Down
-    if (pressed(3))
-        timeScaleIdx = std::min(kNumTimeScales - 1, timeScaleIdx + 1); // Speed Up
-    if (pressed(4))
-        timeDir = -timeDir; // Reverse Time
+    if (pressed(KB_TOGGLE_UI))
+        uiVisible = !uiVisible;
+    if (pressed(KB_PAUSE))
+        timePaused = !timePaused;
+    if (pressed(KB_SLOWER))
+        timeScaleIdx = std::max(0, timeScaleIdx - 1);
+    if (pressed(KB_FASTER))
+        timeScaleIdx = std::min(kNumTimeScales - 1, timeScaleIdx + 1);
+    if (pressed(KB_REVERSE))
+        timeDir = -timeDir;
+    // KB_MOVE_BOOST and KB_MOVE_FINE are held keys — polled in recordCompute, not here.
+
+    // F11: toggle fullscreen
+    if (key == GLFW_KEY_F11)
+    {
+        bool isFs = glfwGetWindowMonitor(win) != nullptr;
+        if (!isFs)
+        {
+            glfwGetWindowPos(win, &windowedX, &windowedY);
+            glfwGetWindowSize(win, &windowedW, &windowedH);
+            GLFWmonitor *mon = glfwGetPrimaryMonitor();
+            const GLFWvidmode *mode = glfwGetVideoMode(mon);
+            glfwSetWindowMonitor(win, mon, 0, 0, mode->width, mode->height, mode->refreshRate);
+        }
+        else
+        {
+            glfwSetWindowMonitor(win, nullptr, windowedX, windowedY, windowedW, windowedH, 0);
+        }
+    }
 }
 
 // ─── onCursorPos ──────────────────────────────────────────────────────────────
@@ -1978,9 +2186,30 @@ void SatelliteSim::initConstellation()
          {1.00f, 1.00f, 0.92f},                    // cyan-teal (distinct from Starlink blue-white)
          ai_sat_panel_area,                        // ~15 m² — Starlink-class bus + extra radiator area
          {AttitudeMode::SunTracking, 18.0f, 1.0f}, // phased-array/compute face toward Earth
-         {AttitudeMode::AntiNadir, 2.0f, 0.25f},   // large radiator panels face deep space
-         0.005f,                                   // minimal structural body scatter
+         {AttitudeMode::AntiNadir, 10.0f, 0.25f},  // large radiator panels face deep space
+         0.001f,                                   // minimal structural body scatter
          0.01f},                                   // mirrorFrac: similar to Starlink — polished compute face
+        {                                          // 5 — Reflect Orbital mirror (speculative, 55 m diameter flat mirror).
+         // FlatMirror45: normal = normalize(sunDir + satNadir).
+         // By construction reflect(-sunDir, n) = satNadir — reflected sunlight
+         // hits the ground directly below the satellite.  In SSO the mirror spends
+         // most of its time near the terminator, so ground observers see a brilliant
+         // slow-moving point of light just before dawn or just after dusk.
+         //
+         // To switch to targeted multi-beam focusing, change AttitudeMode to
+         // TargetedReflector and call the orbit post-processing loop below.
+         //
+         // Area: 55 m diameter circular mirror → π × 27.5² ≈ 2,376 m²
+         // crossSection = sqrt(2376/10) ≈ 15.4  (vs. Starlink ~1.0)
+         // At 500 km, perfect alignment: peak effectFlare ≈ 10,000+ → mag ≈ −11
+         // (comparable to a quarter moon; visible in daylight sky)
+         "Reflect Mirror",
+         {1.00f, 0.97f, 0.94f},                           // warm silver-white
+         2376.0f,                                         // 55 m diameter mirror area (m²)
+         {AttitudeMode::TargetedReflector, 200.0f, 1.0f}, // near-perfect flat mirror; tight but not laser-narrow lobe
+         {AttitudeMode::Perpendicular, 0.0f, 0.0f},       // no secondary surface
+         0.0001f,                                         // no diffuse scatter (mirror absorbs nothing)
+         0.97f},                                          // mirrorFrac: near-perfect specular mirror
     };
 
     // ── Constellation shells ───────────────────────────────────────────────────
@@ -2078,6 +2307,30 @@ void SatelliteSim::initConstellation()
          true,            // alignTerminator: orbital plane = terminator plane (tracks Sun)
          10 * 2,          // numRings:        10 concentric rings
          150'000.0f / 2}, // ringSpacingM:    150 km between rings (575–1,925 km range)
+
+        // Reflect Orbital — speculative 55 m flat mirror constellation (SSO Walker).
+        // FlatMirror45 attitude keeps mirror normal = normalize(sunDir+satNadir) each frame,
+        // reflecting sunlight straight down to the ground below.
+        // Disabled by default: enabling while all other constellations are on exceeds
+        // MAX_SATELLITES=100,000.  Toggle others off first, or raise the cap.
+        //
+        // To enable focused multi-beam targeting (10 ground spots, ~500 mirrors each):
+        //   1. Change typeIdx to 5 — switch sat type primary to TargetedReflector.
+        //      (Add a type-6 TargetedReflector variant and reference it here, or edit type-5.)
+        //   2. Ensure the post-processing loop below runs (it already does for typeIdx==5).
+        {"Reflect Orbital",
+         500'000.0f, // altM:   500 km — low LEO for maximum ground flux
+         0,          // incl:   SSO retrograde (~97.4°) from J2 formula
+         10,         // numPlanes: orbital planes
+         100,        // perPlane:  50×100 = 5,000 satellites
+         5u,         // typeIdx:   Reflect Mirror (FlatMirror45)
+         true,       // enabled:   OFF — enabling pushes total > MAX_SATELLITES
+         OrbitDistribution::Disk,
+         1000.0f, // altJitterM:      no per-satellite altitude scatter
+         0.0f,    // raan:            ignored (alignTerminator=true)
+         true,    // alignTerminator: orbital plane = terminator plane (tracks Sun)
+         10,      // numRings:        10 concentric rings
+         10000},  // ringSpacingM:    150 km between rings (575–1,925 km range)
     };
 
     // ── Populate satOrbits ────────────────────────────────────────────────────
@@ -2168,6 +2421,24 @@ void SatelliteSim::initConstellation()
 
         c.orbitCount = (uint32_t)satOrbits.size() - c.orbitStart;
     }
+    // 67 Right here
+
+    // ── Generate random ground targets for TargetedReflector mode ───────────
+    // kNumReflectorTargets random lat/lon points stored as unit ECEF vectors.
+    // updatePositions() rotates them to ECI each frame and filters for the
+    // night-side terminator zone so mirrors only aim at dark-but-reachable spots.
+    for (int ti = 0; ti < kNumReflectorTargets - 1; ++ti)
+    {
+        // Uniform sampling on sphere: latitude from arcsin of uniform[-1,1],
+        // longitude uniform [0, 2π).
+        float sinLat = (float)rand() / RAND_MAX * 2.0f - 1.0f;
+        float cosLat = sqrtf(std::max(0.0f, 1.0f - sinLat * sinLat));
+        float lon = (float)rand() / RAND_MAX * glm::two_pi<float>();
+        reflectorTargetsECEF[ti] = glm::vec3(cosLat * cosf(lon), cosLat * sinf(lon), sinLat);
+    }
+    // Last slot: fixed target at the observer spawn point (67°S, 67°W).
+    // Guarantees at least one mirror always aims here when the site is on the night side.
+    reflectorTargetsECEF[kNumReflectorTargets - 1] = glm::normalize(glm::vec3(0.2527f, -0.4596f, -0.8205f));
 
     // ── Safety cap ────────────────────────────────────────────────────────────
     // satInputBuf and satVisibleBuf are allocated for exactly MAX_SATELLITES
@@ -2189,6 +2460,9 @@ void SatelliteSim::initConstellation()
     }
     activeSatCount = (uint32_t)satOrbits.size();
     satInputData.resize(activeSatCount);
+    // Zero-initialize mirror normals — zero-length vector is the sentinel that triggers
+    // a snap-to-target on the first frame rather than slewing from a stale direction.
+    satMirrorNormals.assign(activeSatCount, glm::vec3(0.0f));
 }
 
 // ─── updatePositions ──────────────────────────────────────────────────────────
@@ -2210,7 +2484,7 @@ void SatelliteSim::initConstellation()
 //   dedicated GPU compute pass.  The CPU would then only upload simTime + the
 //   ECI→ENU matrix (~120 bytes) rather than the full GpuSatInput array
 //   (~6.4 MB at 100k sats).
-void SatelliteSim::updatePositions(double t)
+void SatelliteSim::updatePositions(double t, float dt)
 {
     // ── Observer ECI position (rotates with Earth) ────────────────────────────
     // fmod keeps the angle small so float trig precision is maintained at large t.
@@ -2282,6 +2556,41 @@ void SatelliteSim::updatePositions(double t)
     // Full moon when moon is opposite the sun; new moon when aligned.
     float moonIllum = (1.0f - glm::dot(sunDirECI, moonDirECI)) * 0.5f;
     moonDirENU = glm::vec4(moonENU_local, moonIllum);
+
+    // ── TargetedReflector: rotate target points to ECI, flag valid ones ─────
+    // ECEF unit vectors rotate to ECI by the GMST angle (Earth's sidereal rotation).
+    // Same rotation formula used for obsECI — consistent frame.
+    //
+    // Validity: the whole night side (sunDot < 0).  Why not restrict to the terminator
+    // zone?  With targets spread across the full night hemisphere, valid targets appear
+    // at DIFFERENT azimuth/elevation positions in the observer's sky as Earth rotates.
+    // Restricting to just the terminator (sunDot > -0.5) puts all valid targets in the
+    // same narrow azimuth band, making the rotation indistinguishable — they all look
+    // "fixed" even though the ECEF rotation is working correctly.
+    //
+    // With 200 targets across the full night side, ~100 are valid at any moment,
+    // spread all the way from the dusk terminator to the dawn terminator.  As Earth
+    // rotates under the constellation, different geographic points enter/exit the
+    // night side and the flare directions visibly sweep across the sky.
+    glm::vec3 reflectorTargetECI[kNumReflectorTargets];
+    bool reflectorTargetValid[kNumReflectorTargets];
+    {
+        float gmst = (float)fmod(kOmegaEarth * t, glm::two_pi<double>());
+        float cosG = cosf(gmst), sinG = sinf(gmst);
+        for (int ti = 0; ti < kNumReflectorTargets; ++ti)
+        {
+            const glm::vec3 &ef = reflectorTargetsECEF[ti];
+            reflectorTargetECI[ti] = kEarthRadius * glm::vec3(
+                                                        cosG * ef.x - sinG * ef.y,
+                                                        sinG * ef.x + cosG * ef.y,
+                                                        ef.z);
+            // Valid on the full night side — not just the terminator strip.
+            // This ensures targets are spread across a wide range of sky azimuths
+            // so the Earth-rotation effect is visually apparent.
+            float sunDot = glm::dot(glm::normalize(reflectorTargetECI[ti]), sunDirECI);
+            reflectorTargetValid[ti] = (sunDot < 0.0f);
+        }
+    }
 
     // ── Per-constellation satellite geometry ──────────────────────────────────
     visibleCount = 0;
@@ -2376,6 +2685,65 @@ void SatelliteSim::updatePositions(double t)
                     // see the face tilted toward them, making flares more likely at low elevation.
                     return -satNadir;
                 }
+                case AttitudeMode::FlatMirror45:
+                {
+                    // Mirror normal is the bisector of the sun-incoming and nadir-outgoing
+                    // directions: n = normalize(sunDir + satNadir).
+                    // By construction reflect(-sunDir, n) = satNadir, so sunlight reflects
+                    // straight toward Earth center below the satellite.
+                    // irr0 = dot(sunDir, n) = |sunDir+satNadir|/2 (always > 0 when sun
+                    // is above satellite's orbital horizon) — mirror always receives flux.
+                    glm::vec3 n = sunDirECI + satNadir;
+                    float len = glm::length(n);
+                    return (len > 1e-5f) ? n / len : satNadir;
+                }
+                case AttitudeMode::TargetedReflector:
+                {
+                    // Find the nearest valid target to this satellite's ground-track position.
+                    // "Valid" = night side and within 30° of the terminator (pre-filtered above).
+                    //
+                    // Nearest is defined by angular distance from the satellite's sub-point
+                    // (i.e. largest dot-product between the satellite's nadir-opposite direction
+                    // and the target's ground direction).
+                    //
+                    // Mirror normal derivation:
+                    //   Incoming sunlight direction (toward surface): -sunDirECI
+                    //   Desired reflected direction (toward target):   toTarget
+                    //   Normal = normalize(sunDirECI + toTarget)
+                    //   Proof: reflect(-sunDirECI, n) = toTarget when n = normalize(sunDirECI + toTarget)
+                    //   because reflect(I,N) = I - 2·dot(N,I)·N and the half-vector of two
+                    //   unit vectors is their normalized sum.
+                    //
+                    // Falls back to FlatMirror45 (straight-down reflection) if no valid target
+                    // exists (e.g., all targets happen to be in daylight).
+                    int bestIdx = -1;
+                    float bestCos = -2.0f; // maximise cosine = minimise angular distance
+                    // -satNadir points from Earth center toward the satellite = satellite's
+                    // zenith direction; dot with target ground dir gives angular proximity.
+                    glm::vec3 satZenith = -satNadir;
+                    for (int ti = 0; ti < kNumReflectorTargets; ++ti)
+                    {
+                        if (!reflectorTargetValid[ti])
+                            continue;
+                        float c = glm::dot(satZenith, glm::normalize(reflectorTargetECI[ti]));
+                        if (c > bestCos)
+                        {
+                            bestCos = c;
+                            bestIdx = ti;
+                        }
+                    }
+                    if (bestIdx < 0)
+                    {
+                        // No valid targets — fall back to FlatMirror45 (reflect straight down).
+                        glm::vec3 n = sunDirECI + satNadir;
+                        float len = glm::length(n);
+                        return (len > 1e-5f) ? n / len : satNadir;
+                    }
+                    glm::vec3 toTarget = glm::normalize(reflectorTargetECI[bestIdx] - satECI_abs);
+                    glm::vec3 n = sunDirECI + toTarget;
+                    float nlen = glm::length(n);
+                    return (nlen > 1e-5f) ? n / nlen : satNadir;
+                }
                 default: // SunTracking
                 {
                     // Two-axis sun-tracking: panel normal points directly at the sun.
@@ -2388,6 +2756,46 @@ void SatelliteSim::updatePositions(double t)
             };
 
             glm::vec3 surfN0 = computeNormal(type.primary.attitude, glm::vec3(0.0f));
+
+            // ── Mirror slew rate (TargetedReflector only) ─────────────────────
+            // computeNormal returns the instantaneous ideal normal (the direction
+            // that perfectly reflects sunlight toward the nearest valid target).
+            // Rate-limit the change so the mirror physically slews toward that goal
+            // rather than snapping the moment a new target becomes nearest.
+            //
+            // satMirrorNormals[i] holds the current physical mirror orientation,
+            // persistent between frames.  Zero-length = uninitialized; snap on
+            // the first frame, then slew at kMirrorRotRateDegPerSec thereafter.
+            if (type.primary.attitude == AttitudeMode::TargetedReflector &&
+                i < (uint32_t)satMirrorNormals.size())
+            {
+                glm::vec3 &cur = satMirrorNormals[i];
+                if (glm::dot(cur, cur) < 0.25f)
+                {
+                    // First frame for this satellite: snap to initial target direction.
+                    cur = surfN0;
+                }
+                else
+                {
+                    // Rotate cur toward surfN0 by at most maxAngle this frame.
+                    float maxAngle = glm::radians(kMirrorRotRateDegPerSec) * dt;
+                    float cosA = glm::clamp(glm::dot(cur, surfN0), -1.0f, 1.0f);
+                    float angle = acosf(cosA);
+                    if (angle <= maxAngle)
+                    {
+                        cur = surfN0; // target reached this frame
+                    }
+                    else
+                    {
+                        // Linear interpolation in 3D then re-normalise ≈ spherical
+                        // interpolation (exact for the small angular steps involved).
+                        float blend = maxAngle / angle;
+                        cur = glm::normalize(glm::mix(cur, surfN0, blend));
+                    }
+                }
+                surfN0 = cur; // feed smoothed normal to the GPU
+            }
+
             glm::vec3 surfN1 = computeNormal(type.secondary.attitude, surfN0);
 
             satInputData[i].eciRelPos = relPos;

@@ -1,5 +1,6 @@
 # ── Build output ──────────────────────────────────────────────────────────────
 build/
+build-linux/
 out/
 
 # ── Compiled shaders (generated at build time from shaders/) ─────────────────

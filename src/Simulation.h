@@ -56,6 +56,11 @@ public:
     // Default: no-op (simulations without audio ignore this).
     virtual void setAudio(AudioSystem* /*audio*/) {}
 
+    // Called by App immediately after init(). Gives the simulation access to the
+    // native window handle for operations like fullscreen toggling.
+    // Default: no-op.
+    virtual void setWindow(GLFWwindow* /*window*/) {}
+
     // Window title shown while this simulation runs
     virtual const char* name() const { return "ShaderFun"; }
 };

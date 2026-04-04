@@ -3,6 +3,7 @@
 #include "clay.h"
 
 #include <cstdio>
+#include <cstring>
 
 void Scene3DDemo::init(VulkanContext &ctx)
 {

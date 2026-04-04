@@ -1,41 +1,39 @@
-# ShaderFun
+# Satellite Constellation Visualizer
 
-A Vulkan GPU playground for shader experiments, particle simulations, and astronomical visualization.
-Built to learn and experiment with Vulkan compute + graphics pipelines.
+Real-time GPU visualization of Earth's satellite megaconstellations and speculative space infrastructure, rendered from any point on the surface with physically-based photometry, atmospheric scattering, and accurate orbital mechanics.
 
-## Simulations
+Built on a Vulkan compute + graphics pipeline. Other simulations (Game of Life, Particles, Scene3D) remain in the codebase but SatelliteSim is the primary focus.
 
-- **Game of Life** — Conway's Game of Life on a 512×512 grid via GPU compute, ping-pong storage images
-- **Particles** — 500k particles simulated and rendered on the GPU; mouse attracts particles
-- **Scene3DDemo** — 3D mesh with SDF-based rendering
-- **StarCatalog** — real star catalog renderer with spectral colors and atmospheric scattering
-- **SatelliteSim** — satellite constellation flare visualizer *(active development)*
+---
 
-### SatelliteSim
+## What it shows
 
-Real-time visualization of satellite constellation flares as seen from any point on Earth.
+You are standing on Earth's surface looking up at the night sky. Every bright point is a real satellite from a real constellation, reflecting sunlight with a physically modeled BRDF. The intensity, color, and flash pattern depend on the satellite's type, orientation, range, and your position relative to the terminator.
 
-- **~99k satellites** across 10 real constellations (Starlink Gen1/2, OneWeb, Kuiper, Xingwang, Telesat, GEO belt, ISS, SpaceX ODC)
-- **Multi-surface photometry** — each satellite type has primary + secondary reflective surfaces with specular/Lambertian BRDFs, mirror peak flash model, and diffuse floor
-- **Physically-based sky** — Rayleigh + Mie atmospheric scattering with analytic auto-exposure; sun, moon disc + halo, star catalog
-- **Satellite sky glow** — up to 64 brightest flares contribute Gaussian sky illumination with proper atmospheric extinction (orange near horizon)
-- **Daytime suppression** — flares fade across the terminator with a realistic atmospheric ramp
-- **SSO precession** — SpaceX ODC terminator-aligned disk shell precesses at 360°/year to stay sun-synchronous
-- **Audio** — spatial flare sound events via miniaudio; volume controls in Settings panel
-- **Time controls** — pause, reverse, and warp from real-time to 1 year/s (1×, 1m, 5m, 1h, 1d, 1w, 1mo, 1yr)
-- **Fixed start epoch** — simulation begins at UTC 2026-03-30 05:53:58, observer at 67°S 67°W, moon phase calibrated to match real sky (~91% waxing gibbous)
-- **Cinematic intro** — full-screen overlay on launch with scene context and controls; dismiss with any key or click
-- **Floating UI** — constellation toggles, camera/display settings, time panel, status bar; black/red colour theme
+- **~100k satellites** across 11 constellations (Starlink, OneWeb, Kuiper, Xingwang, ISS, SpaceX ODC, and more)
+- **Multi-surface photometry** — primary + secondary reflective surfaces, Phong specular lobes, mirror-peak flash model (Iridium-class flares), and isotropic diffuse floor
+- **Physically-based sky** — Rayleigh + Mie atmospheric scattering, sun disc + corona, moon disc + phase, star catalog with spectral colors
+- **Satellite sky glow** — top-64 brightest flares per frame contribute Gaussian sky illumination with atmospheric extinction
+- **Daytime suppression** — realistic terminator ramp; flares survive daylight only above a brightness threshold
+- **SSO precession** — sun-synchronous orbits precess at 360°/year via J2 nodal formula
+- **Reflect Orbital mirrors** — speculative 55 m flat mirror constellation with FlatMirror45 or TargetedReflector attitude modes; mirrors physically slew toward ground targets at a configurable rate
+- **Audio** — spatial flare sound events, music playlist, UI sounds via miniaudio
+- **Time controls** — pause, reverse, 8 warp levels from 1× to 1 year/s
+- **Rebindable controls** — all keyboard bindings editable in the Settings panel at runtime
+
+---
 
 ## Prerequisites
 
 | Dependency | Notes |
 |------------|-------|
-| [Vulkan SDK](https://vulkan.lunarg.com/) | Sets `VULKAN_SDK` environment variable |
+| [Vulkan SDK](https://vulkan.lunarg.com/) | Sets `VULKAN_SDK` env var |
 | CMake 3.20+ | `winget install Kitware.CMake` |
-| Visual Studio 2022 | C++20 compiler + MSBuild |
+| Visual Studio 2022 | C++20 + MSBuild |
 
-GLFW, GLM, Clay (UI), stb (fonts/images), and miniaudio are fetched automatically by CMake at configure time.
+GLFW, GLM, Clay (UI), stb (fonts/images), and miniaudio are fetched automatically at configure time.
+
+---
 
 ## Build
 
@@ -44,60 +42,85 @@ cmake -B build -S .
 cmake --build build
 ```
 
-Or open the folder in **VS Code** with the [CMake Tools](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cmake-tools) extension — press **F5** to build and debug, **F7** to build only.
+Or open the folder in **VS Code** with CMake Tools — **F5** to build + debug, **F7** to build only.
 
-Shaders are auto-detected by CMake, compiled by `glslc`, and copied next to the executable.
+Shaders are auto-detected by CMake, compiled by `glslc`, and copied next to the executable. No manual shader step needed.
 
-## Switching simulations
+---
 
-Edit [`src/main.cpp`](src/main.cpp) and replace the simulation being constructed:
+## Controls
 
-```cpp
-App app(std::make_unique<SatelliteSim>());
-// App app(std::make_unique<GameOfLife>());
-// App app(std::make_unique<Particles>());
-```
-
-Then rebuild. CMake picks up new `.cpp` files automatically — no reconfigure needed.
-
-## SatelliteSim Controls
+All keybindings except right-click and WASD are rebindable in the Settings panel.
 
 | Input | Action |
 |-------|--------|
-| Right-click drag | Look around |
-| WASD | Move observer position along Earth's surface |
-| `,` / `.` | Decrease / increase time scale |
-| `R` | Reverse time |
-| `Space` | Pause / resume |
-| `S` | Toggle settings panel |
+| Right-click drag | Look around (camera) |
+| WASD | Move observer along Earth's surface |
+| Shift + WASD | Move fast |
+| Ctrl + WASD | Move fine (precise placement) |
+| `,` / `.` | Decrease / increase time warp |
+| `Space` | Pause / resume simulation |
+| `R` | Reverse time direction |
+| `Tab` | Toggle UI visibility |
+| `F11` | Toggle fullscreen |
 | `Esc` | Quit |
+
+---
+
+## Constellations
+
+| Name | Satellites | Altitude | Inclination | Type |
+|------|-----------|----------|-------------|------|
+| Starlink Gen1 | 4,392 | 550 km | 53° | Walker |
+| Starlink Gen2 | 30,480 | 525 km | 53.2° | Walker |
+| OneWeb | 648 | 1,200 km | 87.9° | Walker |
+| Amazon LEO (Kuiper) | 7,742 | 630 km | 51.9° | Walker |
+| Xingwang (GW) | 13,920 | 508 km | 85° | Walker |
+| ISS | 1 | 408 km | 51.6° | Walker |
+| SpaceX AI Sat (ODC) | 20,000 | 575–1,925 km | SSO | Disk, alignTerminator |
+| Reflect Orbital | 1,000 | 500 km | SSO | Disk, alignTerminator |
+
+
+Data sources: planet4589.org/space/con/conlist.html, FCC filings, public orbital data.
+
+---
 
 ## Project structure
 
 ```
 src/
-├── main.cpp                    ← pick your simulation here
+├── main.cpp                    ← pick simulation here (one line)
 ├── App.h / App.cpp             ← window + frame loop
 ├── VulkanContext.h / .cpp      ← Vulkan boilerplate + helpers
 ├── Simulation.h                ← abstract base class
 ├── UIRenderer.h / .cpp         ← Clay UI → Vulkan pipeline
 ├── AudioSystem.h / .cpp        ← miniaudio wrapper
 └── simulations/
-    ├── SatelliteSim.h / .cpp   ← satellite constellation visualizer
-    ├── StarCatalog.h / .cpp    ← star catalog renderer
+    ├── SatelliteSim.h / .cpp   ← primary simulation (this project)
+    ├── StarCatalog.h / .cpp    ← star catalog renderer (precursor)
     ├── GameOfLife.h / .cpp     ← Conway's Game of Life
     ├── Particles.h / .cpp      ← GPU particle system
     └── Scene3DDemo.h / .cpp    ← 3D mesh + SDF rendering
-shaders/                        ← GLSL sources (compiled to SPIR-V at build time)
+shaders/
+    sat_flare.comp              ← photometry compute: CPU positions → GPU visibility records
+    sat_point.vert/frag         ← satellite point sprites (additive blend)
+    sat_sky.vert/frag           ← sky background: atmosphere + sun + moon + glow
+    star_point.vert/frag        ← star catalog points
+    ui.vert/frag                ← Clay UI quads + text + icons
 assets/
-└── sound/                      ← audio samples for SatelliteSim
+    sound/                      ← audio: music tracks, flare SFX, UI sounds
+    icons/ui/                   ← PNG icon sprites packed into GPU atlas
 ```
 
-## Adding a new simulation
+---
 
-1. Create `src/simulations/MySim.h` and `MySim.cpp`
-2. Inherit from `Simulation` and implement: `init`, `onResize`, `recordDraw`, `cleanup`
-3. In `main.cpp`: `App app(std::make_unique<MySim>());`
-4. Rebuild — CMake picks up the new `.cpp` automatically
+## Switching simulations
 
-The `VulkanContext&` passed to `init` gives you everything needed: device, physical device, render pass, swapchain extent, and helpers like `ctx.createBuffer()`, `ctx.loadShader()`, `ctx.imageBarrier()`.
+Edit `src/main.cpp`:
+```cpp
+App app(std::make_unique<SatelliteSim>());
+// App app(std::make_unique<GameOfLife>());
+// App app(std::make_unique<Particles>());
+```
+
+Rebuild. No CMake reconfigure needed.

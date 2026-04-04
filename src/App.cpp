@@ -8,6 +8,7 @@ void App::run() {
     initWindow();
     ctx.init(window);
     sim->init(ctx);
+    sim->setWindow(window);  // give sim access to window handle (e.g. fullscreen toggle)
     audio.init();
     sim->setAudio(&audio);  // let the simulation configure its playlist
     ui.init(ctx);
