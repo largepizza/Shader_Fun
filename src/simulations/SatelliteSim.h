@@ -484,7 +484,7 @@ private:
 };
 
 // Time scale options (simulated seconds per real second)
-static constexpr float kTimeScales[] = {1.0f, 60.0f, 300.0f, 3600.0f, 86400.0f,
-                                        86400.0f * 7.0f, 86400.0f * 30.0f, 86400.0f * 365.0f};
-static constexpr const char *kTimeLabels[] = {"1x", "1m", "5m", "1h", "1d", "1w", "1mo", "1yr"};
-static constexpr int kNumTimeScales = 8;
+static constexpr float kTimeScales[] = {1.0f, 10.0f, 60.0f, 300.0f, 3600.0f,
+                                        86400.0f, 86400.0f * 7.0f, 86400.0f * 30.0f, 86400.0f * 365.0f};
+static constexpr const char *kTimeLabels[] = {"1x", "10x", "1m", "5m", "1h", "1d", "1w", "1mo", "1yr"};
+static constexpr int kNumTimeScales = 9;

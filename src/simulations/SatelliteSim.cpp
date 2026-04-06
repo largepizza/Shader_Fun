@@ -1241,8 +1241,8 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                               CLAY_TEXT_CONFIG({.textColor = Pal::textSection, .fontSize = fs(14)}));
                 }
                 CLAY(CLAY_ID("AttrSep"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
-                                                      .padding = {0, 0, 4, 4}},
-                                           .backgroundColor = Pal::sectionHdr}) {}
+                                                     .padding = {0, 0, 4, 4}},
+                                          .backgroundColor = Pal::sectionHdr}) {}
 
                 // Row: constellation data source
                 CLAY(CLAY_ID("Attr0"), {.layout = {
@@ -1258,8 +1258,8 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                 }
 
                 CLAY(CLAY_ID("AttrDiv0"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
-                                                       .padding = {0, 0, 2, 2}},
-                                            .backgroundColor = {30, 30, 32, 255}}) {}
+                                                      .padding = {0, 0, 2, 2}},
+                                           .backgroundColor = {30, 30, 32, 255}}) {}
 
                 // Row: lens flare shader
                 CLAY(CLAY_ID("Attr1"), {.layout = {
@@ -2148,7 +2148,7 @@ void SatelliteSim::initConstellation()
          10.0f,                                      // ~10 m² bus + visor
          {AttitudeMode::NadirPointing, 18.0f, 1.0f}, // very sharp specular (flat mirror-like face)
          {AttitudeMode::Perpendicular, 0.0f, 0.0f},  // no significant secondary surface
-         0.0f,                                       // no diffuse floor (visor-darkened)
+         0.02f,                                      // no diffuse floor (visor-darkened)
          0.05f},                                     // mirrorFrac: polished phased-array glass → mag ~-2.7 at perfect alignment
         {                                            // 1 — LEO broadband (OneWeb/Kuiper/Xingwang/Telesat): sun-tracking panels
          "LEO Broadband",
@@ -2156,7 +2156,7 @@ void SatelliteSim::initConstellation()
          5.0f,                  // ~12 m² typical LEO broadband bus + panels
          {AttitudeMode::SunTracking, 18.0f, 1.0f},
          {AttitudeMode::Perpendicular, 0.0f, 0.0f},
-         0.0f,   // no diffuse floor
+         0.02f,  // no diffuse floor
          0.02f}, // mirrorFrac: moderate — sun-tracking panels occasionally flash
         {        // 2 — GEO Comsat: large sun-tracking panels + body radiators facing away from Earth
          "GEO Comsat",
@@ -2164,7 +2164,7 @@ void SatelliteSim::initConstellation()
          50.0f,                                    // ~50 m² (large GEO body + wings)
          {AttitudeMode::SunTracking, 3.0f, 1.00f}, // broad lobe solar wings
          {AttitudeMode::AntiNadir, 2.0f, 0.10f},   // body radiators face deep space
-         0.01f,                                    // slight structural glow
+         0.05f,                                    // slight structural glow
          0.10f},                                   // mirrorFrac: large polished antenna dishes, well-aligned
         {                                          // 3 — ISS: enormous truss-mounted solar arrays AND large radiator panels.
          // The PVTCS and EATCS radiators (~900 m² NH3 panels on the ITS) face away from
@@ -2185,7 +2185,7 @@ void SatelliteSim::initConstellation()
          "SpaceX AI Sats",
          {1.00f, 1.00f, 0.92f},                    // cyan-teal (distinct from Starlink blue-white)
          ai_sat_panel_area,                        // ~15 m² — Starlink-class bus + extra radiator area
-         {AttitudeMode::SunTracking, 18.0f, 1.0f}, // phased-array/compute face toward Earth
+         {AttitudeMode::SunTracking, 25.0f, 1.0f}, // phased-array/compute face toward Earth
          {AttitudeMode::AntiNadir, 10.0f, 0.25f},  // large radiator panels face deep space
          0.001f,                                   // minimal structural body scatter
          0.01f},                                   // mirrorFrac: similar to Starlink — polished compute face
@@ -2208,8 +2208,19 @@ void SatelliteSim::initConstellation()
          2376.0f,                                         // 55 m diameter mirror area (m²)
          {AttitudeMode::TargetedReflector, 200.0f, 1.0f}, // near-perfect flat mirror; tight but not laser-narrow lobe
          {AttitudeMode::Perpendicular, 0.0f, 0.0f},       // no secondary surface
-         0.0001f,                                         // no diffuse scatter (mirror absorbs nothing)
+         0.001f,                                          // no diffuse scatter (mirror absorbs nothing)
          0.97f},                                          // mirrorFrac: near-perfect specular mirror
+        {                                                 // 6 — Space debris: defunct satellites, rocket bodies, fragments.
+         // Tumbling attitude — chaotic rotation around a random body axis.
+         // Rate varies per object from near-stationary to ~1 Hz flicker.
+         // Small area, rough surfaces, no attitude control.
+         "Debris",
+         {0.78f, 0.74f, 0.68f},                     // dull grey-tan (aged thermal blanket / oxidised metal)
+         1.0f,                                      // ~3 m² effective cross-section (fragment to small bus)
+         {AttitudeMode::Tumbling, 6.0f, 1.0f},      // rough diffuse tumble; occasional glint
+         {AttitudeMode::Perpendicular, 6.0f, 0.0f}, // no secondary surface
+         0.01f,                                     // high diffuse floor — structural clutter scatters everywhere
+         0.03f},                                    // rare metallic glints from exposed foil or polished surfaces
     };
 
     // ── Constellation shells ───────────────────────────────────────────────────
@@ -2331,6 +2342,20 @@ void SatelliteSim::initConstellation()
          true,    // alignTerminator: orbital plane = terminator plane (tracks Sun)
          10,      // numRings:        10 concentric rings
          10000},  // ringSpacingM:    150 km between rings (575–1,925 km range)
+
+        // Space Junk — LEO debris shell modelling defunct satellites, rocket bodies,
+        // and large fragments.  Random inclinations (0–180°) give isotropic coverage.
+        // Each object gets an independent tumble axis + rate (0–1 Hz) so flickers
+        // are desynchronised across the shell.
+        {"Space Junk",
+         1'000'000.0f,     // altM:       600 km — centre of dense LEO debris band
+         glm::pi<float>(), // incl: random 0..180° → full spherical coverage
+         100,              // numPlanes:  }
+         30,               // perPlane:   } 1 × 3,000 = 3,000 debris objects
+         6u,               // typeIdx:    Debris (typeIdx 6)
+         true,             // enabled
+         OrbitDistribution::RandomShell,
+         500'000.0f}, // altJitterM: ±200 km → 400–800 km altitude band
     };
 
     // ── Populate satOrbits ────────────────────────────────────────────────────
@@ -2367,7 +2392,9 @@ void SatelliteSim::initConstellation()
                 float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
                 glm::vec3 axis{sinTheta * cosf(phi), sinTheta * sinf(phi), cosTheta};
 
-                float tumbleRate = 0.008f * (float)rand() / (float)RAND_MAX;
+                // Randomise rotation rate 0..2π rad/s (0..1 Hz) so debris
+                // objects tumble independently rather than blinking in unison.
+                float tumbleRate = (float)rand() / (float)RAND_MAX * glm::two_pi<float>() * 0.001;
                 float tumblePhase = (float)rand() / RAND_MAX * glm::two_pi<float>();
 
                 satOrbits.push_back({raan, incl, u0, c.typeIdx, altM,
@@ -2427,7 +2454,7 @@ void SatelliteSim::initConstellation()
     // kNumReflectorTargets random lat/lon points stored as unit ECEF vectors.
     // updatePositions() rotates them to ECI each frame and filters for the
     // night-side terminator zone so mirrors only aim at dark-but-reachable spots.
-    for (int ti = 0; ti < kNumReflectorTargets - 1; ++ti)
+    for (int ti = 1; ti < kNumReflectorTargets - 1; ++ti)
     {
         // Uniform sampling on sphere: latitude from arcsin of uniform[-1,1],
         // longitude uniform [0, 2π).
@@ -2439,6 +2466,10 @@ void SatelliteSim::initConstellation()
     // Last slot: fixed target at the observer spawn point (67°S, 67°W).
     // Guarantees at least one mirror always aims here when the site is on the night side.
     reflectorTargetsECEF[kNumReflectorTargets - 1] = glm::normalize(glm::vec3(0.2527f, -0.4596f, -0.8205f));
+
+    // Zeroth slot
+    // Antartic Station
+    reflectorTargetsECEF[kNumReflectorTargets - 1] = glm::normalize(glm::vec3(0, 0, -1.0));
 
     // ── Safety cap ────────────────────────────────────────────────────────────
     // satInputBuf and satVisibleBuf are allocated for exactly MAX_SATELLITES
