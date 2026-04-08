@@ -12,6 +12,15 @@
 #include <ctime>
 #include <algorithm>
 #include <stdexcept>
+#include <fstream>
+#include <unordered_map>
+
+#include <nlohmann/json.hpp>
+
+// Windows-only: GetModuleFileNameA for exe-directory discovery
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
 
 // ── Earth + observer constants ─────────────────────────────────────────────────
 static constexpr float kEarthRadius = 6'371'000.0f; // mean Earth radius (m)
@@ -78,6 +87,15 @@ static glm::vec3 sunDirECIAtJ2000()
 // ─── init ─────────────────────────────────────────────────────────────────────
 void SatelliteSim::init(VulkanContext &ctx)
 {
+    // Resolve directory that contains the executable so we can find constellations.json.
+    {
+        char buf[MAX_PATH] = {};
+        GetModuleFileNameA(nullptr, buf, MAX_PATH);
+        std::string p(buf);
+        size_t sep = p.find_last_of("/\\");
+        exeDir_ = (sep != std::string::npos) ? p.substr(0, sep) : ".";
+    }
+
     // Fixed start time: 2026-03-30 05:53:58 UTC
     // J2000.0 = 2000-01-01 12:00:00 UTC = Unix 946728000
     // 2026-03-30 05:53:58 UTC = Unix 1774849038
@@ -859,15 +877,14 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                       .padding = {0, 0, 4, 4}},
                                            .backgroundColor = Pal::sectionHdr}) {}
 
-                static char constCntBuf[10][16];
-                for (int ci = 0; ci < (int)constellations.size() && ci < 10; ++ci)
+                static char constCntBuf[256][16]; // one slot per constellation; 256 > any realistic mod
+                for (int ci = 0; ci < (int)constellations.size() && ci < 256; ++ci)
                 {
                     ConstellationConfig &c = constellations[ci];
                     snprintf(constCntBuf[ci], sizeof(constCntBuf[ci]), "%u", c.orbitCount);
 
-                    Clay_Color rowBg = c.enabled
-                                           ? Pal::rowEnabled
-                                           : Pal::rowDisabled;
+                    bool hov = ci < (int)hovConst.size() && hovConst[ci];
+                    Clay_Color rowBg = c.enabled ? Pal::rowEnabled : Pal::rowDisabled;
                     CLAY(CLAY_IDI("ConstRow", ci), {.layout = {
                                                         .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(24)},
                                                         .padding = {4, 4, 3, 3},
@@ -879,7 +896,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                     {
                         Clay_Color btnBg = c.enabled
                                                ? Pal::btnAccent
-                                               : (hovConst[ci] ? Pal::btnAccentHv : Pal::btnIdle);
+                                               : (hov ? Pal::btnAccentHv : Pal::btnIdle);
                         CLAY(CLAY_IDI("ConstBtn", ci), {.layout = {
                                                             .sizing = {CLAY_SIZING_FIXED(30), CLAY_SIZING_FIXED(18)},
                                                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
@@ -888,22 +905,28 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                         {
                             {
                                 bool n = Clay_Hovered();
-                                sndRollover(n, hovConst[ci]);
+                                sndRollover(n, hov);
                                 sndClick(n);
-                                hovConst[ci] = n;
+                                if (ci < (int)hovConst.size())
+                                    hovConst[ci] = n;
                             }
-                            if (hovConst[ci] && inp.lmbPressed)
+                            if (hov && inp.lmbPressed)
                                 c.enabled = !c.enabled;
                             CLAY_TEXT(c.enabled ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
                                       CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(10)}));
                         }
-                        CLAY(CLAY_IDI("ConstName", ci), {.layout = {.sizing = {CLAY_SIZING_FIXED(150), CLAY_SIZING_FIT(0)}}})
+                        CLAY(CLAY_IDI("ConstName", ci), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}}})
                         {
-                            Clay_String nameStr{false, (int32_t)strlen(c.name), c.name};
+                            Clay_String nameStr{false, (int32_t)c.name.size(), c.name.data()};
                             CLAY_TEXT(nameStr, CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(12)}));
                         }
-                        Clay_String cntStr{false, (int32_t)strlen(constCntBuf[ci]), constCntBuf[ci]};
-                        CLAY_TEXT(cntStr, CLAY_TEXT_CONFIG({.textColor = Pal::textCamera, .fontSize = fs(11)}));
+                        CLAY(CLAY_IDI("ConstCnt", ci), {.layout = {
+                                                             .sizing = {CLAY_SIZING_FIXED(52), CLAY_SIZING_FIT(0)},
+                                                             .childAlignment = {.x = CLAY_ALIGN_X_RIGHT}}})
+                        {
+                            Clay_String cntStr{false, (int32_t)strlen(constCntBuf[ci]), constCntBuf[ci]};
+                            CLAY_TEXT(cntStr, CLAY_TEXT_CONFIG({.textColor = Pal::textCamera, .fontSize = fs(11)}));
+                        }
                     }
                 }
 
@@ -1311,9 +1334,11 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                              .layoutDirection = CLAY_TOP_TO_BOTTOM}})
             {
                 // ── Title ─────────────────────────────────────────────────────
-                CLAY_TEXT(CLAY_STRING("Welcome to the future!"),
+                CLAY_TEXT(CLAY_STRING("SAT LIGHT SIM"),
                           CLAY_TEXT_CONFIG({.textColor = {255, 255, 255, 255},
                                             .fontSize = fs(34)}));
+                CLAY_TEXT(CLAY_STRING("by papereater"),
+                          CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(12)}));
 
                 CLAY(CLAY_ID("IP1"), {.layout = {.sizing = {CLAY_SIZING_FIXED(1),
                                                             CLAY_SIZING_FIXED(22)}}}) {}
@@ -1324,7 +1349,8 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                 .childGap = 14,
                                                 .layoutDirection = CLAY_TOP_TO_BOTTOM}})
                 {
-                    CLAY_TEXT(CLAY_STRING("Every planned major space constellation has been constructed."),
+
+                    CLAY_TEXT(CLAY_STRING("Welcome to the near future! Every planned major space constellation has been constructed. This simulation aims to realistically model what these will look like from the ground."),
                               CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(18)}));
                     CLAY_TEXT(CLAY_STRING("Perpetual sunshine lies in sun synchronous orbit, following the terminator line of the Earth. This has become competitive real estate for football field-sized space datacenters and mirror reflectors"),
                               CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(18)}));
@@ -2113,33 +2139,158 @@ void SatelliteSim::updateStars()
 }
 
 // ─── initConstellation ────────────────────────────────────────────────────────
-// Define satellite types + constellation shells; populate flat satOrbits array.
-// Orbit distribution types:
-//   Walker      — regular planes × sats grid (classic constellation)
-//   RandomShell — random RAAN, random incl in [0, c.incl], jittered altitude
-//   Disk        — one or more concentric rings in a fixed orbital plane (incl + raan).
-//                 Set alignTerminator=true to auto-derive the plane from sunDirECI.
+// Entry point called once from init().  Loads satellite type and constellation
+// definitions (from constellations.json or hardcoded fallback), then builds the
+// flat satOrbits array that drives per-frame position updates.
 void SatelliteSim::initConstellation()
 {
-    // ── Satellite type catalogue ───────────────────────────────────────────────
-    // crossSectionM2: effective reflective area in m².  Brightness ∝ sqrt(area/10 m²)
-    // so doubling the area → ~1.4× brighter (avoids runaway scale for giant structures).
-    //
-    // Each type composes up to two reflective surfaces plus an isotropic diffuse floor:
-    //   primary   — dominant surface (solar panels, antenna face)
-    //   secondary — optional second surface (radiators perpendicular to primay)
-    //               weight=0 disables it; Perpendicular attitude = cross(surfN0, satNadir)
-    //   diffuse   — constant Lambertian floor for structural body scatter (always visible)
+    loadDefinitions();
+    buildOrbits();
+}
 
+// ─── JSON helpers (file-local) ────────────────────────────────────────────────
+static AttitudeMode parseAttitudeMode(const std::string &s)
+{
+    if (s == "NadirPointing")
+        return AttitudeMode::NadirPointing;
+    if (s == "SunTracking")
+        return AttitudeMode::SunTracking;
+    if (s == "Tumbling")
+        return AttitudeMode::Tumbling;
+    if (s == "Perpendicular")
+        return AttitudeMode::Perpendicular;
+    if (s == "AntiNadir")
+        return AttitudeMode::AntiNadir;
+    if (s == "FlatMirror45")
+        return AttitudeMode::FlatMirror45;
+    if (s == "TargetedReflector")
+        return AttitudeMode::TargetedReflector;
+    fprintf(stderr, "[SatelliteSim] Unknown AttitudeMode '%s'; using NadirPointing.\n", s.c_str());
+    return AttitudeMode::NadirPointing;
+}
+
+static SurfaceSpec parseSurfaceSpec(const nlohmann::json &j)
+{
+    return {
+        parseAttitudeMode(j.value("attitude", std::string("NadirPointing"))),
+        j.value("spec_exp", 0.0f),
+        j.value("weight", 0.0f),
+    };
+}
+
+// ─── loadDefinitions ─────────────────────────────────────────────────────────
+// Reads constellations.json from the exe directory.  If the file is missing or
+// malformed, falls back to loadHardcoded() and logs the reason to stderr.
+void SatelliteSim::loadDefinitions()
+{
+    std::string jsonPath = exeDir_ + "/constellations.json";
+    std::ifstream f(jsonPath);
+    if (!f.is_open())
+    {
+        fprintf(stderr, "[SatelliteSim] constellations.json not found at '%s';"
+                        " using hardcoded defaults.\n",
+                jsonPath.c_str());
+        loadHardcoded();
+        return;
+    }
+
+    nlohmann::json j;
+    try
+    {
+        f >> j;
+    }
+    catch (const nlohmann::json::exception &e)
+    {
+        fprintf(stderr, "[SatelliteSim] Failed to parse constellations.json: %s\n"
+                        "              Using hardcoded defaults.\n",
+                e.what());
+        loadHardcoded();
+        return;
+    }
+
+    // ── Satellite types ───────────────────────────────────────────────────────
+    satTypes.clear();
+    for (const auto &jt : j.value("satellite_types", nlohmann::json::array()))
+    {
+        SatelliteType t;
+        t.name = jt["name"].get<std::string>();
+        auto col = jt["base_color"];
+        t.baseColor = {col[0].get<float>(), col[1].get<float>(), col[2].get<float>()};
+        t.crossSectionM2 = jt["cross_section_m2"].get<float>();
+        t.primary = parseSurfaceSpec(jt["primary"]);
+        t.secondary = jt.contains("secondary")
+                          ? parseSurfaceSpec(jt["secondary"])
+                          : SurfaceSpec{AttitudeMode::Perpendicular, 0.0f, 0.0f};
+        t.diffuse = jt.value("diffuse", 0.02f);
+        t.mirrorFrac = jt.value("mirror_frac", 0.0f);
+        satTypes.push_back(std::move(t));
+    }
+
+    // Build name → index map so constellations can reference types by name.
+    std::unordered_map<std::string, uint32_t> typeMap;
+    for (uint32_t i = 0; i < (uint32_t)satTypes.size(); ++i)
+        typeMap[satTypes[i].name] = i;
+
+    // ── Constellations ────────────────────────────────────────────────────────
+    constellations.clear();
+    for (const auto &jc : j.value("constellations", nlohmann::json::array()))
+    {
+        ConstellationConfig c;
+        c.name = jc["name"].get<std::string>();
+        c.numPlanes = jc["num_planes"].get<int>();
+        c.perPlane = jc["per_plane"].get<int>();
+        c.altM = jc["alt_km"].get<float>() * 1000.0f;
+        c.incl = glm::radians(jc.value("incl_deg", 0.0f));
+        c.enabled = jc.value("enabled", true);
+
+        std::string typeName = jc["type"].get<std::string>();
+        auto it = typeMap.find(typeName);
+        if (it == typeMap.end())
+        {
+            fprintf(stderr, "[SatelliteSim] Constellation '%s' references unknown type '%s';"
+                            " skipping.\n",
+                    c.name.c_str(), typeName.c_str());
+            continue;
+        }
+        c.typeIdx = it->second;
+
+        std::string dist = jc.value("distribution", std::string("Walker"));
+        if (dist == "RandomShell")
+            c.distribution = OrbitDistribution::RandomShell;
+        else if (dist == "Disk")
+            c.distribution = OrbitDistribution::Disk;
+        else
+            c.distribution = OrbitDistribution::Walker;
+
+        c.altJitterM = jc.value("alt_jitter_km", 0.0f) * 1000.0f;
+        c.raan = glm::radians(jc.value("raan_deg", 0.0f));
+        c.alignTerminator = jc.value("align_terminator", false);
+        c.numRings = jc.value("num_rings", 1);
+        c.ringSpacingM = jc.value("ring_spacing_km", 0.0f) * 1000.0f;
+
+        constellations.push_back(std::move(c));
+    }
+
+    hovConst.assign(constellations.size(), false);
+    fprintf(stderr, "[SatelliteSim] Loaded %zu satellite type(s) and %zu constellation(s)"
+                    " from %s\n",
+            satTypes.size(), constellations.size(), jsonPath.c_str());
+}
+
+// ─── loadHardcoded ────────────────────────────────────────────────────────────
+// Hardcoded satellite type catalogue and constellation shells — used as fallback
+// when constellations.json is absent or malformed.
+void SatelliteSim::loadHardcoded()
+{
     // AI SAT
     // 175 m estimate, 1820 x 72
     // scale 1820px / 175 m
     // 870 * 72 px panels
     // 200 x 55 px radiator panels
 
-    float px_scale = 1820.0f / 175.0f;                                         // ~10.4 px/meter for the bus/antenna face
-    float ai_sat_panel_area = (870.0f * 72.0f * 2.0f) / (px_scale * px_scale); // ~600 m² total panel area
-    float ai_sat_radiator_area = (200.0f * 55.0f) / (px_scale * px_scale);     // ~100 m² total radiator area
+    float px_scale = 1820.0f / 175.0f;                                                      // ~10.4 px/meter for the bus/antenna face
+    float ai_sat_panel_area = (870.0f * 72.0f * 2.0f) / (px_scale * px_scale);              // ~1158 m² total panel area
+    [[maybe_unused]] float ai_sat_radiator_area = (200.0f * 55.0f) / (px_scale * px_scale); // ~102 m² total radiator area
 
     satTypes = {
         {// 0 — Starlink: flat phased-array face toward Earth, brief intense flares
@@ -2358,6 +2509,15 @@ void SatelliteSim::initConstellation()
          500'000.0f}, // altJitterM: ±200 km → 400–800 km altitude band
     };
 
+    hovConst.assign(constellations.size(), false);
+}
+
+// ─── buildOrbits ──────────────────────────────────────────────────────────────
+// Generates the flat satOrbits array from whatever is currently in satTypes and
+// constellations (loaded by loadDefinitions or loadHardcoded).
+// Also generates reflector ground targets and applies the MAX_SATELLITES cap.
+void SatelliteSim::buildOrbits()
+{
     // ── Populate satOrbits ────────────────────────────────────────────────────
     satOrbits.clear();
     for (ConstellationConfig &c : constellations)

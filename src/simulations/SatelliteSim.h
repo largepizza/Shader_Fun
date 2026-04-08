@@ -9,6 +9,7 @@
 
 #include "../Simulation.h"
 
+#include <string>
 #include <vector>
 #include <cstdint>
 #include <cmath>
@@ -66,7 +67,7 @@ struct SurfaceSpec
 // ── Per-type satellite parameters (CPU-side, drives GpuSatInput fields) ───────
 struct SatelliteType
 {
-    const char *name;
+    std::string name;
     glm::vec3 baseColor;   // visual tint
     float crossSectionM2;  // total reflective area (m²); brightness ∝ sqrt(area/10)
     SurfaceSpec primary;   // always active (solar panels, antenna face, etc.)
@@ -83,7 +84,7 @@ struct SatelliteType
 // orbitStart/Count are filled by initConstellation() — do not set manually.
 struct ConstellationConfig
 {
-    const char *name;
+    std::string name;
     float altM;       // orbital altitude above surface (meters)
     float incl;       // Walker: fixed inclination; RandomShell: max inclination (radians)
     int numPlanes;    // Walker: number of planes; other: total satellite count
@@ -261,7 +262,7 @@ struct SatOrbit
 class SatelliteSim : public Simulation
 {
 public:
-    const char *name() const override { return "Satellite Constellation"; }
+    const char *name() const override { return "SAT LIGHT SIM"; }
 
     void init(VulkanContext &ctx) override;
     void onResize(VulkanContext &ctx) override;
@@ -370,6 +371,7 @@ private:
     float sfxVol_ = 1.0f;
     VulkanContext *ctx_ = nullptr; // set in init(), used for lazy icon loading
     AudioSystem *audio_ = nullptr; // set via setAudio(), used in buildUI()
+    std::string exeDir_;           // directory containing the exe; set in init()
 
     // ── Key bindings (editable in the settings window) ────────────────────────
     // All interactive keys go here — both event keys (pressed once) and held keys
@@ -382,8 +384,8 @@ private:
     struct KeyBinding
     {
         const char *action;
-        int  key;
-        bool held      = false; // true = polled (held modifier), false = event (pressed once)
+        int key;
+        bool held = false; // true = polled (held modifier), false = event (pressed once)
         bool listening = false;
     };
     std::vector<KeyBinding> keybindings;
@@ -392,14 +394,14 @@ private:
     // keybindings array without magic numbers.
     enum KB
     {
-        KB_TOGGLE_UI   = 0,
-        KB_PAUSE       = 1,
-        KB_SLOWER      = 2,
-        KB_FASTER      = 3,
-        KB_REVERSE     = 4,
-        KB_MOVE_BOOST  = 5, // held
-        KB_MOVE_FINE   = 6, // held
-        KB_COUNT       = 7,
+        KB_TOGGLE_UI = 0,
+        KB_PAUSE = 1,
+        KB_SLOWER = 2,
+        KB_FASTER = 3,
+        KB_REVERSE = 4,
+        KB_MOVE_BOOST = 5, // held
+        KB_MOVE_FINE = 6,  // held
+        KB_COUNT = 7,
     };
 
     // ── ECI → ENU rotation (updated each frame in updatePositions) ────────────
@@ -448,7 +450,7 @@ private:
     float dmx = 0, dmy = 0; // accumulated delta for this frame
 
     // ── UI hover state (one-frame lag) ────────────────────────────────────────
-    bool hovConst[10] = {};
+    std::vector<bool> hovConst; // one entry per constellation; sized in loadDefinitions()
     bool hovTimeSlower = false;
     bool hovTimePause = false;
     bool hovTimeFaster = false;
@@ -477,7 +479,10 @@ private:
     void initStars(VulkanContext &ctx);
     void createStarPipeline(VulkanContext &ctx);
     void updateStars();
-    void initConstellation();                        // called once: populates satOrbits
+    void initConstellation();                        // called once: loads definitions then builds orbits
+    void loadDefinitions();                          // reads constellations.json; falls back to hardcoded defaults
+    void loadHardcoded();                            // hardcoded satTypes + constellations (used as fallback)
+    void buildOrbits();                              // populates satOrbits from satTypes + constellations
     void updatePositions(double t, float dt = 0.0f); // called each frame: fills satInputData + eci2enu
                                                      // dt = simulated seconds elapsed this frame (0 when paused);
                                                      // used for mirror slew rate so behaviour is consistent at all time scales

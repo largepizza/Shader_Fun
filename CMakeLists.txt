@@ -67,10 +67,21 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(miniaudio)
 
+# nlohmann/json — header-only JSON parser (MIT). Used to load constellations.json at runtime.
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW TRUE
+)
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+set(JSON_Install    OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(nlohmann_json)
+
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 add_executable(ShaderFun ${SOURCES})
 target_include_directories(ShaderFun PRIVATE src ${clay_SOURCE_DIR} ${stb_SOURCE_DIR} ${miniaudio_SOURCE_DIR})
-target_link_libraries(ShaderFun PRIVATE Vulkan::Vulkan glfw glm::glm)
+target_link_libraries(ShaderFun PRIVATE Vulkan::Vulkan glfw glm::glm nlohmann_json::nlohmann_json)
 
 # Shader compilation
 find_program(GLSLC glslc HINTS "$ENV{VULKAN_SDK}/bin")
@@ -112,6 +123,23 @@ add_custom_command(TARGET ShaderFun POST_BUILD
         $<TARGET_FILE_DIR:ShaderFun>/shaders
     COMMENT "Copying shaders to output directory"
 )
+
+# Copy moddable data files next to the executable.
+# constellations.schema.json: copied unconditionally (never user-edited).
+# constellations.json:        copied only if it does not already exist at the destination
+#                             so that user edits are preserved across rebuilds.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/data")
+    add_custom_command(TARGET ShaderFun POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/data/constellations.schema.json"
+            "$<TARGET_FILE_DIR:ShaderFun>/constellations.schema.json"
+        COMMAND ${CMAKE_COMMAND}
+            -DFILE="${CMAKE_CURRENT_SOURCE_DIR}/data/constellations.json"
+            -DDEST="$<TARGET_FILE_DIR:ShaderFun>/constellations.json"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CopyIfMissing.cmake"
+        COMMENT "Copying data files to output directory"
+    )
+endif()
 
 # Copy assets (icons, textures, etc.) next to the executable
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")

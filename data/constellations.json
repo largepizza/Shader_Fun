@@ -1,0 +1,174 @@
+{
+  "$schema": "./constellations.schema.json",
+  "version": 1,
+
+  "satellite_types": [
+    {
+      "name": "Starlink",
+      "base_color": [0.80, 0.87, 1.00],
+      "cross_section_m2": 10.0,
+      "primary":   { "attitude": "NadirPointing", "spec_exp": 18.0, "weight": 1.0 },
+      "secondary": { "attitude": "Perpendicular",  "spec_exp":  0.0, "weight": 0.0 },
+      "diffuse": 0.02,
+      "mirror_frac": 0.05
+    },
+    {
+      "name": "LEO Broadband",
+      "base_color": [1.00, 0.92, 0.75],
+      "cross_section_m2": 5.0,
+      "primary":   { "attitude": "SunTracking",  "spec_exp": 18.0, "weight": 1.0 },
+      "secondary": { "attitude": "Perpendicular", "spec_exp":  0.0, "weight": 0.0 },
+      "diffuse": 0.02,
+      "mirror_frac": 0.02
+    },
+    {
+      "name": "GEO Comsat",
+      "base_color": [0.95, 0.95, 1.00],
+      "cross_section_m2": 50.0,
+      "primary":   { "attitude": "SunTracking", "spec_exp": 3.0, "weight": 1.00 },
+      "secondary": { "attitude": "AntiNadir",   "spec_exp": 2.0, "weight": 0.10 },
+      "diffuse": 0.05,
+      "mirror_frac": 0.10
+    },
+    {
+      "name": "ISS",
+      "base_color": [1.00, 0.85, 0.70],
+      "cross_section_m2": 250.0,
+      "primary":   { "attitude": "SunTracking", "spec_exp": 12.0, "weight": 1.00 },
+      "secondary": { "attitude": "AntiNadir",   "spec_exp":  4.0, "weight": 0.35 },
+      "diffuse": 0.04,
+      "mirror_frac": 0.05
+    },
+    {
+      "name": "SpaceX AI Sats",
+      "base_color": [1.00, 1.00, 0.92],
+      "cross_section_m2": 1158.28,
+      "primary":   { "attitude": "SunTracking", "spec_exp": 25.0, "weight": 1.0  },
+      "secondary": { "attitude": "AntiNadir",   "spec_exp": 10.0, "weight": 0.25 },
+      "diffuse": 0.001,
+      "mirror_frac": 0.01
+    },
+    {
+      "name": "Reflect Mirror",
+      "base_color": [1.00, 0.97, 0.94],
+      "cross_section_m2": 2376.0,
+      "primary":   { "attitude": "TargetedReflector", "spec_exp": 200.0, "weight": 1.0 },
+      "secondary": { "attitude": "Perpendicular",     "spec_exp":   0.0, "weight": 0.0 },
+      "diffuse": 0.001,
+      "mirror_frac": 0.97
+    },
+    {
+      "name": "Debris",
+      "base_color": [0.78, 0.74, 0.68],
+      "cross_section_m2": 1.0,
+      "primary":   { "attitude": "Tumbling",     "spec_exp": 6.0, "weight": 1.0 },
+      "secondary": { "attitude": "Perpendicular", "spec_exp": 6.0, "weight": 0.0 },
+      "diffuse": 0.01,
+      "mirror_frac": 0.03
+    }
+  ],
+
+  "constellations": [
+    {
+      "name": "Starlink Gen1",
+      "type": "Starlink",
+      "alt_km": 550.0,
+      "incl_deg": 53.0,
+      "num_planes": 72,
+      "per_plane": 61,
+      "enabled": true,
+      "distribution": "Walker"
+    },
+    {
+      "name": "Starlink Gen2",
+      "type": "Starlink",
+      "alt_km": 525.0,
+      "incl_deg": 53.2,
+      "num_planes": 120,
+      "per_plane": 254,
+      "enabled": true,
+      "distribution": "Walker"
+    },
+    {
+      "name": "OneWeb",
+      "type": "LEO Broadband",
+      "alt_km": 1200.0,
+      "incl_deg": 87.9,
+      "num_planes": 18,
+      "per_plane": 36,
+      "enabled": true,
+      "distribution": "Walker"
+    },
+    {
+      "name": "Amazon LEO",
+      "type": "LEO Broadband",
+      "alt_km": 630.0,
+      "incl_deg": 51.9,
+      "num_planes": 98,
+      "per_plane": 79,
+      "enabled": true,
+      "distribution": "Walker"
+    },
+    {
+      "name": "Xingwang",
+      "type": "LEO Broadband",
+      "alt_km": 508.0,
+      "incl_deg": 85.0,
+      "num_planes": 80,
+      "per_plane": 174,
+      "enabled": true,
+      "distribution": "Walker"
+    },
+    {
+      "name": "ISS",
+      "type": "ISS",
+      "alt_km": 408.0,
+      "incl_deg": 51.6,
+      "num_planes": 1,
+      "per_plane": 1,
+      "enabled": true,
+      "distribution": "Walker"
+    },
+    {
+      "name": "SpaceX AI Sat",
+      "type": "SpaceX AI Sats",
+      "alt_km": 1250.0,
+      "incl_deg": 0.0,
+      "num_planes": 200,
+      "per_plane": 100,
+      "enabled": true,
+      "distribution": "Disk",
+      "alt_jitter_km": 5.0,
+      "raan_deg": 0.0,
+      "align_terminator": true,
+      "num_rings": 20,
+      "ring_spacing_km": 75.0
+    },
+    {
+      "name": "Reflect Orbital",
+      "type": "Reflect Mirror",
+      "alt_km": 500.0,
+      "incl_deg": 0.0,
+      "num_planes": 10,
+      "per_plane": 100,
+      "enabled": true,
+      "distribution": "Disk",
+      "alt_jitter_km": 1.0,
+      "raan_deg": 0.0,
+      "align_terminator": true,
+      "num_rings": 10,
+      "ring_spacing_km": 10.0
+    },
+    {
+      "name": "Space Junk",
+      "type": "Debris",
+      "alt_km": 1000.0,
+      "incl_deg": 180.0,
+      "num_planes": 100,
+      "per_plane": 30,
+      "enabled": true,
+      "distribution": "RandomShell",
+      "alt_jitter_km": 500.0
+    }
+  ]
+}
