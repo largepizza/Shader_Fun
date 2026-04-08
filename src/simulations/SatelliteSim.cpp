@@ -17,10 +17,20 @@
 
 #include <nlohmann/json.hpp>
 
-// Windows-only: GetModuleFileNameA for exe-directory discovery
+#include <filesystem>
+#include <string>
+
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#elif defined(__linux__)
+#include <unistd.h> // readlink
+#include <limits.h> // PATH_MAX
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h> // _NSGetExecutablePath
+#include <limits.h>
+#endif
 
 // ── Earth + observer constants ─────────────────────────────────────────────────
 static constexpr float kEarthRadius = 6'371'000.0f; // mean Earth radius (m)
@@ -84,17 +94,35 @@ static glm::vec3 sunDirECIAtJ2000()
                                     float(sin(lamR) * sin(epsR))});
 }
 
+static std::filesystem::path resolveExeDir()
+{
+#if defined(_WIN32)
+    char buf[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    return std::filesystem::path(buf).parent_path();
+
+#elif defined(__linux__)
+    char buf[PATH_MAX] = {};
+    ssize_t len = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len != -1)
+        return std::filesystem::path(std::string(buf, len)).parent_path();
+
+#elif defined(__APPLE__)
+    char buf[PATH_MAX] = {};
+    uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) == 0)
+        return std::filesystem::path(buf).parent_path();
+#endif
+
+    // Universal fallback: use current working directory
+    return std::filesystem::current_path();
+}
+
 // ─── init ─────────────────────────────────────────────────────────────────────
 void SatelliteSim::init(VulkanContext &ctx)
 {
     // Resolve directory that contains the executable so we can find constellations.json.
-    {
-        char buf[MAX_PATH] = {};
-        GetModuleFileNameA(nullptr, buf, MAX_PATH);
-        std::string p(buf);
-        size_t sep = p.find_last_of("/\\");
-        exeDir_ = (sep != std::string::npos) ? p.substr(0, sep) : ".";
-    }
+    exeDir_ = resolveExeDir().string();
 
     // Fixed start time: 2026-03-30 05:53:58 UTC
     // J2000.0 = 2000-01-01 12:00:00 UTC = Unix 946728000
@@ -921,8 +949,8 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                             CLAY_TEXT(nameStr, CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(12)}));
                         }
                         CLAY(CLAY_IDI("ConstCnt", ci), {.layout = {
-                                                             .sizing = {CLAY_SIZING_FIXED(52), CLAY_SIZING_FIT(0)},
-                                                             .childAlignment = {.x = CLAY_ALIGN_X_RIGHT}}})
+                                                            .sizing = {CLAY_SIZING_FIXED(52), CLAY_SIZING_FIT(0)},
+                                                            .childAlignment = {.x = CLAY_ALIGN_X_RIGHT}}})
                         {
                             Clay_String cntStr{false, (int32_t)strlen(constCntBuf[ci]), constCntBuf[ci]};
                             CLAY_TEXT(cntStr, CLAY_TEXT_CONFIG({.textColor = Pal::textCamera, .fontSize = fs(11)}));
@@ -2183,7 +2211,7 @@ static SurfaceSpec parseSurfaceSpec(const nlohmann::json &j)
 // malformed, falls back to loadHardcoded() and logs the reason to stderr.
 void SatelliteSim::loadDefinitions()
 {
-    std::string jsonPath = exeDir_ + "/constellations.json";
+    auto jsonPath = (std::filesystem::path(exeDir_) / "constellations.json").string();
     std::ifstream f(jsonPath);
     if (!f.is_open())
     {
