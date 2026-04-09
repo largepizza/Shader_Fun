@@ -303,12 +303,33 @@ void main() {
     const float kMoonBright    = 0.54;
     if (moonDirENU.z > -kMoonAngR * 2.0) {
         vec3  moonDir3 = normalize(moonDirENU.xyz);
-        vec3  oc = -moonDir3;
-        float bm = dot(oc, dir);
-        float cm = 1.0 - kMoonAngR * kMoonAngR;
+
+        // ── Atmospheric refraction squish ─────────────────────────────────────
+        // Near the horizon, differential refraction lifts the bottom limb more
+        // than the top, compressing the apparent disc height.  The Bennett formula
+        // gives refraction R(el) in arcminutes; the squish fraction is the
+        // difference in R across the disc diameter, divided by the disc diameter.
+        float squish = 0.0;
+        float elDeg  = degrees(asin(clamp(moonDirENU.z, -1.0, 1.0)));
+        if (elDeg < 15.0) {
+            float r   = degrees(kMoonAngR);             // disc angular radius, degrees
+            float elo = max(elDeg - r, 0.2);            // lower limb elevation (clamped off ground)
+            float ehi = elDeg + r;                      // upper limb elevation
+            float Rlo = 1.02 / tan(radians(elo + 10.3 / (elo + 5.11))); // arcmin
+            float Rhi = 1.02 / tan(radians(ehi + 10.3 / (ehi + 5.11)));
+            squish = clamp((Rlo - Rhi) / (2.0 * r * 60.0), 0.0, 0.5);
+        }
+        // Stretching dir.z before intersection maps screen pixels into a
+        // vertically compressed disc-space — the silhouette becomes a physical
+        // ellipse (shorter in elevation) matching the naked-eye refraction effect.
+        vec3  dirR  = normalize(vec3(dir.xy, dir.z * (1.0 + squish)));
+
+        vec3  oc    = -moonDir3;
+        float bm    = dot(oc, dirR);
+        float cm    = 1.0 - kMoonAngR * kMoonAngR;
         float discm = bm * bm - cm;
         if (discm >= 0.0) {
-            vec3  hp = (-bm - sqrt(discm)) * dir;
+            vec3  hp = (-bm - sqrt(discm)) * dirR;
             vec3  n  = normalize(hp - moonDir3);
             float diffuse  = max(0.0, dot(n, sunDir)) * moonDirENU.w;
             float mu       = max(0.0, dot(n, -moonDir3));
