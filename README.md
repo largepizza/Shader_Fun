@@ -2,7 +2,7 @@
 
 Real-time GPU visualization of Earth's satellite megaconstellations and speculative space infrastructure, rendered from any point on the surface with physically-based photometry, atmospheric scattering, and accurate orbital mechanics.
 
-Built on a Vulkan compute + graphics pipeline. Other simulations (Game of Life, Particles, Scene3D) remain in the codebase but SatelliteSim is the primary focus.
+Built on a Vulkan compute + graphics pipeline.
 
 ---
 
@@ -10,14 +10,14 @@ Built on a Vulkan compute + graphics pipeline. Other simulations (Game of Life, 
 
 You are standing on Earth's surface looking up at the night sky. Every bright point is a real satellite from a real constellation, reflecting sunlight with a physically modeled BRDF. The intensity, color, and flash pattern depend on the satellite's type, orientation, range, and your position relative to the terminator.
 
-- **~100k satellites** across 11 constellations (Starlink, OneWeb, Kuiper, Xingwang, ISS, SpaceX ODC, and more)
+- **~100k satellites** across 11 constellations (Starlink, OneWeb, Amazon LEO, Xingwang, ISS, SpaceX AI, and more)
 - **Multi-surface photometry** — primary + secondary reflective surfaces, Phong specular lobes, mirror-peak flash model (Iridium-class flares), and isotropic diffuse floor
 - **Physically-based sky** — Rayleigh + Mie atmospheric scattering, sun disc + corona, moon disc + phase, star catalog with spectral colors
 - **Satellite sky glow** — top-64 brightest flares per frame contribute Gaussian sky illumination with atmospheric extinction
 - **Daytime suppression** — realistic terminator ramp; flares survive daylight only above a brightness threshold
 - **SSO precession** — sun-synchronous orbits precess at 360°/year via J2 nodal formula
 - **Reflect Orbital mirrors** — speculative 55 m flat mirror constellation with FlatMirror45 or TargetedReflector attitude modes; mirrors physically slew toward ground targets at a configurable rate
-- **Audio** — spatial flare sound events, music playlist, UI sounds via miniaudio
+- **Audio** — Music playlist, UI sounds via miniaudio
 - **Time controls** — pause, reverse, 8 warp levels from 1× to 1 year/s
 - **Rebindable controls** — all keyboard bindings editable in the Settings panel at runtime
 
@@ -78,7 +78,7 @@ All keybindings except right-click and WASD are rebindable in the Settings panel
 | Xingwang (GW) | 13,920 | 508 km | 85° | Walker |
 | ISS | 1 | 408 km | 51.6° | Walker |
 | SpaceX AI Sat (ODC) | 20,000 | 575–1,925 km | SSO | Disk, alignTerminator |
-| Reflect Orbital | 1,000 | 500 km | SSO | Disk, alignTerminator |
+| Reflect Orbital | 5,000 | 500 km | SSO | Disk, alignTerminator |
 
 
 Data sources: planet4589.org/space/con/conlist.html, FCC filings, public orbital data.
