@@ -5,6 +5,7 @@
 #include <random>
 #include <stdexcept>
 #include <cstdio>
+#include <cstring>
 
 // clay.h is a single-header library; CLAY_IMPLEMENTATION is defined only in UIRenderer.cpp.
 // Include here without the implementation define so we can use the CLAY macros.

@@ -1,0 +1,171 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SatelliteSim Constellation Configuration",
+  "description": "Defines satellite types and constellation shells loaded at runtime by ShaderFun/SatelliteSim.",
+  "type": "object",
+  "required": ["satellite_types", "constellations"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "description": "Schema version. Currently 1.",
+      "default": 1
+    },
+    "satellite_types": {
+      "type": "array",
+      "description": "Catalogue of satellite visual/photometric models. Each constellation references one by name.",
+      "items": {
+        "type": "object",
+        "required": ["name", "base_color", "cross_section_m2", "primary"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Unique identifier for this type. Constellations reference it via the 'type' field."
+          },
+          "base_color": {
+            "type": "array",
+            "description": "RGB tint [r, g, b] in linear [0, 1] space. Multiplied with the computed flare intensity.",
+            "items": { "type": "number", "minimum": 0, "maximum": 1 },
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "cross_section_m2": {
+            "type": "number",
+            "description": "Total reflective area in square metres. Brightness scales as sqrt(area / 10). Starlink ≈ 10, ISS ≈ 250, Reflect Mirror ≈ 2376.",
+            "exclusiveMinimum": 0
+          },
+          "primary": { "$ref": "#/$defs/surface_spec" },
+          "secondary": { "$ref": "#/$defs/surface_spec" },
+          "diffuse": {
+            "type": "number",
+            "description": "Isotropic Lambertian floor [0, 1]. Models structural body scatter visible from all angles. 0 = no diffuse floor.",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.02
+          },
+          "mirror_frac": {
+            "type": "number",
+            "description": "Fraction of the primary surface that is a near-perfect mirror [0, 1]. Adds an ultra-narrow specular spike (MIRROR_BOOST = 300×) on top of the Phong lobe. 0.97 = Reflect Mirror; 0.05 = Starlink.",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "constellations": {
+      "type": "array",
+      "description": "List of constellation shells. Each shell generates a set of orbits on startup.",
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "alt_km", "num_planes", "per_plane"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Display name shown in the Settings panel."
+          },
+          "type": {
+            "type": "string",
+            "description": "Name of a satellite_type entry. Must match exactly."
+          },
+          "alt_km": {
+            "type": "number",
+            "description": "Orbital altitude above the Earth's surface in kilometres. LEO: 200–2000, MEO: 2000–35786, GEO: ~35786.",
+            "exclusiveMinimum": 0
+          },
+          "incl_deg": {
+            "type": "number",
+            "description": "Orbital inclination in degrees. Walker: fixed for all planes. RandomShell: maximum inclination (sats drawn uniformly from [0, incl_deg]). Ignored when align_terminator is true.",
+            "minimum": 0,
+            "maximum": 180,
+            "default": 0
+          },
+          "num_planes": {
+            "type": "integer",
+            "description": "Walker/Disk: number of orbital planes. RandomShell: ignored (total = num_planes × per_plane). Total satellites = num_planes × per_plane for all distributions.",
+            "minimum": 1
+          },
+          "per_plane": {
+            "type": "integer",
+            "description": "Satellites per orbital plane (Walker/Disk), or per unit for RandomShell. Total = num_planes × per_plane.",
+            "minimum": 1
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether this shell is visible on startup. Can be toggled in the Settings panel at runtime.",
+            "default": true
+          },
+          "distribution": {
+            "type": "string",
+            "description": "Orbit generation algorithm. Walker: regular grid. RandomShell: random RAAN + incl. Disk: concentric rings in a fixed plane.",
+            "enum": ["Walker", "RandomShell", "Disk"],
+            "default": "Walker"
+          },
+          "alt_jitter_km": {
+            "type": "number",
+            "description": "Per-satellite altitude scatter ±km (RandomShell and Disk). Walker ignores this.",
+            "minimum": 0,
+            "default": 0
+          },
+          "raan_deg": {
+            "type": "number",
+            "description": "Disk only: Right Ascension of the Ascending Node for the orbital plane, in degrees. Ignored when align_terminator is true.",
+            "default": 0
+          },
+          "align_terminator": {
+            "type": "boolean",
+            "description": "Disk only: if true, override incl_deg and raan_deg so the orbital plane aligns with the Earth–Sun terminator and precesses at the SSO rate (~1 revolution per year). Gives a sun-synchronous orbit anchored to the day/night boundary.",
+            "default": false
+          },
+          "num_rings": {
+            "type": "integer",
+            "description": "Disk only: number of concentric rings. 1 = single ring at alt_km. The rings are evenly spaced around alt_km by ring_spacing_km.",
+            "minimum": 1,
+            "default": 1
+          },
+          "ring_spacing_km": {
+            "type": "number",
+            "description": "Disk only: altitude step between consecutive rings in kilometres. Total altitude range = (num_rings - 1) × ring_spacing_km, centred on alt_km.",
+            "minimum": 0,
+            "default": 0
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "surface_spec": {
+      "type": "object",
+      "description": "One reflective surface of a satellite.",
+      "required": ["attitude", "spec_exp", "weight"],
+      "properties": {
+        "attitude": {
+          "type": "string",
+          "description": "How the surface normal is oriented each frame. NadirPointing: face toward Earth. SunTracking: track the sun. Tumbling: random spin. Perpendicular: cross(primary, nadir). AntiNadir: face away from Earth. FlatMirror45: reflect sunlight straight down. TargetedReflector: aim reflected beam at nearest night-side ground target.",
+          "enum": [
+            "NadirPointing",
+            "SunTracking",
+            "Tumbling",
+            "Perpendicular",
+            "AntiNadir",
+            "FlatMirror45",
+            "TargetedReflector"
+          ]
+        },
+        "spec_exp": {
+          "type": "number",
+          "description": "Phong specular exponent. 0 = pure Lambertian diffuse. Higher values = narrower, brighter specular lobe. Typical range: 2 (broad) – 200 (near-mirror).",
+          "minimum": 0
+        },
+        "weight": {
+          "type": "number",
+          "description": "Contribution weight relative to the primary surface. Primary is always 1.0. Secondary: 0 = disabled, 0.1–0.5 = partial contribution.",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
