@@ -135,15 +135,16 @@ void SatelliteSim::init(VulkanContext &ctx)
     // held=true  → polled every frame in recordCompute (modifier/held keys)
     // held=false → fired once in onKey (toggle/event keys)
     keybindings = {
-        {"Toggle UI", GLFW_KEY_TAB, false, false},         // KB_TOGGLE_UI
-        {"Pause/Resume", GLFW_KEY_SPACE, false, false},    // KB_PAUSE
-        {"Slow Down", GLFW_KEY_COMMA, false, false},       // KB_SLOWER
-        {"Speed Up", GLFW_KEY_PERIOD, false, false},       // KB_FASTER
-        {"Reverse Time", GLFW_KEY_R, false, false},        // KB_REVERSE
-        {"Move Fast", GLFW_KEY_LEFT_SHIFT, true, false},   // KB_MOVE_BOOST (held)
-        {"Move Fine", GLFW_KEY_LEFT_CONTROL, true, false}, // KB_MOVE_FINE  (held)
+        {"Toggle UI", GLFW_KEY_TAB, false, false},          // KB_TOGGLE_UI
+        {"Pause/Resume", GLFW_KEY_SPACE, false, false},     // KB_PAUSE
+        {"Slow Down", GLFW_KEY_COMMA, false, false},        // KB_SLOWER
+        {"Speed Up", GLFW_KEY_PERIOD, false, false},        // KB_FASTER
+        {"Reverse Time", GLFW_KEY_R, false, false},         // KB_REVERSE
+        {"Move Fast", GLFW_KEY_LEFT_SHIFT, true, false},    // KB_MOVE_BOOST (held)
+        {"Move Fine", GLFW_KEY_LEFT_CONTROL, true, false},  // KB_MOVE_FINE  (held)
+        {"Cinematic Pan", GLFW_KEY_LEFT_ALT, false, false}, // KB_CINEMATIC  (event, toggle)
     };
-    static_assert(KB_COUNT == 7, "KB enum and keybindings initializer are out of sync");
+    static_assert(KB_COUNT == 8, "KB enum and keybindings initializer are out of sync");
 
     createBuffers(ctx);
     createDescriptors(ctx);
@@ -475,16 +476,72 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
     // Apply camera mouse look.
     // Yaw  (dmx): rotate obsFacing around obsDir via Rodrigues — no ENU frame, no pole issue.
     // Pitch (dmy): handled by camera.update → camera.elDeg as usual.
+    //
+    // Cinematic mode (RMB + ALT held): mouse input adds force to a velocity that
+    // drifts and decays, so the camera coasts smoothly after the mouse stops.
+    // Releasing ALT instantly zeroes the velocity and returns to direct control.
     if (win)
     {
-        camera.update(win, 0.0f, dmy); // pitch only; we handle yaw below
-
-        if (camera.captured && dmx != 0.0f)
+        // Clear cinematic mode as soon as RMB is released — the toggle only lives
+        // while a pan is active, so it resets automatically for the next drag.
+        if (!camera.captured && cinematicMode)
         {
-            // cross(obsDir, obsFacing) is the LEFT tangent, so negate angle for look-right.
-            float angle = glm::radians(-dmx * camera.sens);
-            glm::vec3 leftDir = glm::cross(obsDir, obsFacing);
-            obsFacing = glm::normalize(cosf(angle) * obsFacing + sinf(angle) * leftDir);
+            cinematicMode = false;
+            cinematicYawVel = 0.0f;
+            cinematicPitchVel = 0.0f;
+        }
+
+        bool cinematic = camera.captured && cinematicMode;
+
+        if (cinematic)
+        {
+            // Let camera.update handle RMB capture/release without applying any rotation.
+            camera.update(win, 0.0f, 0.0f);
+
+            // Mouse input adds to velocity as an impulse (kForce fraction of raw delta).
+            // Velocity units: pixels-equivalent — same as dmx/dmy — so it slots straight
+            // into the Rodrigues and elDeg formulas below without any unit conversion.
+            const float kForce = 0.2f;
+            cinematicYawVel += dmx * kForce;
+            cinematicPitchVel += dmy * kForce;
+
+            // Apply velocity this frame (identical math to the direct-control path).
+            if (fabsf(cinematicYawVel) > 0.0001f)
+            {
+                float angle = glm::radians(-cinematicYawVel * camera.sens);
+                glm::vec3 leftDir = glm::cross(obsDir, obsFacing);
+                obsFacing = glm::normalize(cosf(angle) * obsFacing + sinf(angle) * leftDir);
+            }
+            camera.elDeg -= cinematicPitchVel * camera.sens;
+            camera.elDeg = glm::clamp(camera.elDeg, -89.0f, 89.0f);
+
+            // Exponential decay — half-life ≈ 0.87 s (kDamp = 0.8 → e^-0.8 per second).
+            // float decay = expf(-0.999f * dt);
+            // cinematicYawVel *= decay;
+            // cinematicPitchVel *= decay;
+
+            cinematicActive = true;
+        }
+        else
+        {
+            // Normal direct control: pitch via camera.update, yaw via Rodrigues.
+            camera.update(win, 0.0f, dmy);
+
+            if (camera.captured && dmx != 0.0f)
+            {
+                // cross(obsDir, obsFacing) is the LEFT tangent, so negate angle for look-right.
+                float angle = glm::radians(-dmx * camera.sens);
+                glm::vec3 leftDir = glm::cross(obsDir, obsFacing);
+                obsFacing = glm::normalize(cosf(angle) * obsFacing + sinf(angle) * leftDir);
+            }
+
+            // Kill any residual drift immediately when leaving cinematic mode.
+            if (cinematicActive)
+            {
+                cinematicYawVel = 0.0f;
+                cinematicPitchVel = 0.0f;
+                cinematicActive = false;
+            }
         }
 
         // Derive camera.azDeg from obsFacing projected into the local Earth-fixed ENU.
@@ -1547,6 +1604,8 @@ void SatelliteSim::onKey(GLFWwindow *w, int key, int action)
         timeScaleIdx = std::min(kNumTimeScales - 1, timeScaleIdx + 1);
     if (pressed(KB_REVERSE))
         timeDir = -timeDir;
+    if (pressed(KB_CINEMATIC) && camera.captured)
+        cinematicMode = !cinematicMode;
     // KB_MOVE_BOOST and KB_MOVE_FINE are held keys — polled in recordCompute, not here.
 
     // F11: toggle fullscreen
@@ -1753,18 +1812,81 @@ void SatelliteSim::createGlowResources(VulkanContext &ctx)
         vkCreateSampler(ctx.device, &sci, nullptr, &noiseSampler);
     }
 
-    // ── Descriptor set layout: binding 0 = SSBO, binding 1 = noise sampler ────
-    VkDescriptorSetLayoutBinding bindings[2] = {};
+    // ── Moon texture: near-side face disc image (binding 2) ──────────────────
+    {
+        int w = 0, h = 0, ch = 0;
+        stbi_uc *pixels = stbi_load("assets/textures/full_moon.png", &w, &h, &ch, 4);
+        if (!pixels)
+            throw std::runtime_error("SatelliteSim: failed to load assets/textures/full_moon.png");
+
+        VkDeviceSize imgBytes = (VkDeviceSize)w * h * 4;
+
+        VkBuffer stageBuf;
+        VkDeviceMemory stageMem;
+        ctx.createBuffer(imgBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         stageBuf, stageMem);
+        void *mapped;
+        vkMapMemory(ctx.device, stageMem, 0, imgBytes, 0, &mapped);
+        memcpy(mapped, pixels, (size_t)imgBytes);
+        vkUnmapMemory(ctx.device, stageMem);
+        stbi_image_free(pixels);
+
+        ctx.createImage((uint32_t)w, (uint32_t)h,
+                        VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                        moonTex, moonTexMem);
+
+        {
+            auto cmd = ctx.beginOneTimeCommands();
+            ctx.imageBarrier(cmd, moonTex,
+                             0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            VkBufferImageCopy region{};
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
+            vkCmdCopyBufferToImage(cmd, stageBuf, moonTex,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            ctx.imageBarrier(cmd, moonTex,
+                             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            ctx.endOneTimeCommands(cmd);
+        }
+        vkDestroyBuffer(ctx.device, stageBuf, nullptr);
+        vkFreeMemory(ctx.device, stageMem, nullptr);
+
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = moonTex;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCreateImageView(ctx.device, &vci, nullptr, &moonTexView);
+
+        VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sci.magFilter = VK_FILTER_LINEAR;
+        sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vkCreateSampler(ctx.device, &sci, nullptr, &moonSampler);
+    }
+
+    // ── Descriptor set layout: binding 0 = SSBO, 1 = noise sampler, 2 = moon tex
+    VkDescriptorSetLayoutBinding bindings[3] = {};
     bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     bindings[1] = {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    bindings[2] = {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 2;
+    li.bindingCount = 3;
     li.pBindings = bindings;
     vkCreateDescriptorSetLayout(ctx.device, &li, nullptr, &skyDescLayout);
 
     VkDescriptorPoolSize ps[2] = {
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},
     };
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.poolSizeCount = 2;
@@ -1779,9 +1901,10 @@ void SatelliteSim::createGlowResources(VulkanContext &ctx)
     vkAllocateDescriptorSets(ctx.device, &ai, &skyDescSet);
 
     VkDescriptorBufferInfo bufInfo{glowBuf, 0, VK_WHOLE_SIZE};
-    VkDescriptorImageInfo imgInfo{noiseSampler, noiseTexView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo noiseImgInfo{noiseSampler, noiseTexView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo moonImgInfo{moonSampler, moonTexView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
-    VkWriteDescriptorSet writes[2] = {};
+    VkWriteDescriptorSet writes[3] = {};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = skyDescSet;
     writes[0].dstBinding = 0;
@@ -1793,8 +1916,14 @@ void SatelliteSim::createGlowResources(VulkanContext &ctx)
     writes[1].dstBinding = 1;
     writes[1].descriptorCount = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[1].pImageInfo = &imgInfo;
-    vkUpdateDescriptorSets(ctx.device, 2, writes, 0, nullptr);
+    writes[1].pImageInfo = &noiseImgInfo;
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = skyDescSet;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorCount = 1;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[2].pImageInfo = &moonImgInfo;
+    vkUpdateDescriptorSets(ctx.device, 3, writes, 0, nullptr);
 }
 
 // Fullscreen triangle that colors pixels sky or ground based on camera elevation.

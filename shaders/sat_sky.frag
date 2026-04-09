@@ -28,6 +28,11 @@ layout(std430, set = 0, binding = 0) readonly buffer GlowBuf {
 // variation in lensFlare().  Replaces the original ShaderToy's iChannel0 lookup.
 layout(set = 0, binding = 1) uniform sampler2D noiseTex;
 
+// Moon surface texture (binding 2): near-side face disc image.
+// Sampled with an orthographic projection of the surface normal onto the moon's
+// local face frame — maps the near hemisphere to the full [0,1] UV range.
+layout(set = 0, binding = 2) uniform sampler2D moonTex;
+
 layout(location = 0) out vec4 outColor;
 
 const float PI = 3.14159265359;
@@ -290,8 +295,12 @@ void main() {
     vec3 color = SUN_INTENSITY * (pR * BETA_R * accumR + vec3(pM * BETA_M * accumM));
 
     // ── Moon disc ─────────────────────────────────────────────────────────────
-    const float kMoonAngR   = 0.004578 * 3.0;
-    const float kMoonBright = 0.12;
+    // kMoonTexRotDeg: rotates the texture CW in the UV plane to align the image's
+    // north pole with the physical lunar north pole as seen from the observer.
+    // Tune this until the terminator's shadow boundary matches the image poles.
+    const float kMoonTexRotDeg = 180.0;
+    const float kMoonAngR      = 0.004578 * 3.0;
+    const float kMoonBright    = 0.54;
     if (moonDirENU.z > -kMoonAngR * 2.0) {
         vec3  moonDir3 = normalize(moonDirENU.xyz);
         vec3  oc = -moonDir3;
@@ -304,9 +313,30 @@ void main() {
             float diffuse  = max(0.0, dot(n, sunDir)) * moonDirENU.w;
             float mu       = max(0.0, dot(n, -moonDir3));
             float limbDark = 0.35 + 0.65 * sqrt(mu);
-            const float kEarth  = 0.018 * 0.2;
-            const vec3  kAlbedo = vec3(0.88, 0.85, 0.82);
-            vec3 moonColor = kAlbedo * (diffuse + kEarth) * limbDark * kMoonBright;
+            const float kEarth = 0.018 * 0.2;
+
+            // Build the moon's local face frame: moonZ points toward the observer
+            // (tidally locked near side), moonX/moonY span the visible face plane.
+            vec3 moonZ = -moonDir3;
+            vec3 refUp = abs(moonZ.z) < 0.99 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+            vec3 moonX = normalize(cross(refUp, moonZ));
+            vec3 moonY = cross(moonZ, moonX);
+
+            // Orthographic projection of the surface normal onto the face plane.
+            // At the disc centre n == moonZ → UV (0.5, 0.5); at the limb UV spans [0,1].
+            vec2 moonUV = vec2(dot(n, moonX), dot(n, moonY)) * 0.5 + 0.5;
+
+            // Rotate UV around disc centre by kMoonTexRotDeg to align image north pole
+            // with the physical lunar north pole. Positive = CCW rotation of the texture.
+            float rotRad = radians(kMoonTexRotDeg);
+            float cosR = cos(rotRad), sinR = sin(rotRad);
+            vec2  uvc  = moonUV - 0.5;
+            moonUV = vec2(cosR * uvc.x - sinR * uvc.y,
+                          sinR * uvc.x + cosR * uvc.y) + 0.5;
+
+            vec3 texColor = texture(moonTex, moonUV).rgb;
+
+            vec3 moonColor = texColor * (diffuse + kEarth) * limbDark * kMoonBright;
             vec3 moonAttn  = exp(-(BETA_R * odR_cam + BETA_M * 1.1 * odM_cam));
             color += moonColor * moonAttn;
         }
@@ -357,14 +387,22 @@ void main() {
     float moonIllum = moonDirENU.w;
     color += vec3(0.0025, 0.003, 0.004) * moonIllum * moonEl * nightAmt;
 
-    // ── Moon atmospheric halo ──────────────────────────────────────────────────
+    // ── Moon glow: tight corona + wide diffuse halo ───────────────────────────
     if (moonDirENU.z > -0.05) {
         vec3  moonDir3  = normalize(moonDirENU.xyz);
         float moonAngle = acos(clamp(dot(dir, moonDir3), -1.0, 1.0));
-        float scale     = 100.0;
-        float halo      = exp(-moonAngle * moonAngle / (2.0 * 0.018 * 0.018 * scale * scale));
         float moonFade  = smoothstep(-0.05, 0.02, moonDirENU.z);
         float hClip     = smoothstep(-0.02, 0.03, dir.z);
+
+        // Tight inner corona — peaks at the disc edge (~0.014 rad), falls to ~8% at 3× disc radius.
+        // sigma = 0.012 rad ≈ 0.7°; gives a crisp bloom ring without polluting the wider sky.
+        float corona = exp(-moonAngle * moonAngle / (2.0 * 0.012 * 0.012)) * nightAmt;
+        color += hClip * moonFade * corona * vec3(0.92, 0.94, 1.00) * moonIllum * 0.04;
+
+        // Wide diffuse halo — very broad Gaussian (sigma ≈ 1.8 rad) that lifts the whole
+        // night sky slightly around the moon, matching the real scattered moonlight glow.
+        float scale = 100.0;
+        float halo  = exp(-moonAngle * moonAngle / (2.0 * 0.018 * 0.018 * scale * scale));
         color += hClip * moonFade * halo * vec3(0.88, 0.90, 1.00) * moonIllum * 0.012;
     }
 

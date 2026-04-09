@@ -359,6 +359,11 @@ private:
     VkDeviceMemory noiseTexMem = VK_NULL_HANDLE;
     VkImageView noiseTexView = VK_NULL_HANDLE;
     VkSampler noiseSampler = VK_NULL_HANDLE;
+    // Moon texture (binding 2): near-side face disc image for surface detail.
+    VkImage moonTex = VK_NULL_HANDLE;
+    VkDeviceMemory moonTexMem = VK_NULL_HANDLE;
+    VkImageView moonTexView = VK_NULL_HANDLE;
+    VkSampler moonSampler = VK_NULL_HANDLE;
 
     // ── UI visibility & settings ──────────────────────────────────────────────
     bool showIntro = true; // cinematic intro overlay; dismissed on click or any key
@@ -399,9 +404,10 @@ private:
         KB_SLOWER = 2,
         KB_FASTER = 3,
         KB_REVERSE = 4,
-        KB_MOVE_BOOST = 5, // held
-        KB_MOVE_FINE = 6,  // held
-        KB_COUNT = 7,
+        KB_MOVE_BOOST = 5,    // held
+        KB_MOVE_FINE = 6,     // held
+        KB_CINEMATIC = 7,     // event — toggles camera drift mode while panning
+        KB_COUNT = 8,
     };
 
     // ── ECI → ENU rotation (updated each frame in updatePositions) ────────────
@@ -448,6 +454,13 @@ private:
     bool firstMouse = true;
     double prevX = 0, prevY = 0;
     float dmx = 0, dmy = 0; // accumulated delta for this frame
+    // Cinematic drift mode (toggled by KB_CINEMATIC while RMB is held).
+    // Mouse adds force to velocity instead of directly rotating; velocity coasts and decays.
+    // Mode is cleared automatically when RMB is released.
+    bool  cinematicMode     = false; // toggle state
+    float cinematicYawVel   = 0.0f; // pixels-equivalent/s driving Rodrigues yaw
+    float cinematicPitchVel = 0.0f; // pixels-equivalent/s driving elDeg pitch
+    bool  cinematicActive   = false; // true last frame — used to detect transition-out
 
     // ── UI hover state (one-frame lag) ────────────────────────────────────────
     std::vector<bool> hovConst; // one entry per constellation; sized in loadDefinitions()
