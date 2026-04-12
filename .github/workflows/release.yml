@@ -1,0 +1,140 @@
+name: Release
+
+# Fires on any tag matching v1.2.3 — create one with:
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:   # also lets you trigger manually from the Actions tab
+
+jobs:
+  # ── Windows ────────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vulkan SDK
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: latest
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Tools, Glslang
+          vulkan-use-cache: true
+
+      - name: Configure
+        run: cmake -B build-release -S . -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-release --config Release --parallel
+
+      - name: Package
+        run: |
+          mkdir dist
+          Copy-Item build-release/Release/ShaderFun.exe            dist/
+          Copy-Item build-release/Release/shaders                   dist/ -Recurse
+          Copy-Item build-release/Release/assets                    dist/ -Recurse
+          Copy-Item build-release/Release/constellations.json       dist/ -ErrorAction SilentlyContinue
+          Copy-Item build-release/Release/constellations.schema.json dist/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/* -DestinationPath ShaderFun-${{ github.ref_name }}-windows.zip
+        shell: pwsh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShaderFun-windows
+          path: ShaderFun-${{ github.ref_name }}-windows.zip
+
+  # ── Linux ──────────────────────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vulkan SDK
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: latest
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Tools, Glslang
+          vulkan-use-cache: true
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libx11-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+            ninja-build
+
+      - name: Configure
+        run: cmake -B build-release -S . -DCMAKE_BUILD_TYPE=Release -G Ninja
+
+      - name: Build
+        run: cmake --build build-release --parallel
+
+      - name: Package
+        run: |
+          mkdir dist
+          cp build-release/ShaderFun                    dist/
+          cp -r build-release/shaders                   dist/
+          cp -r build-release/assets                    dist/
+          cp build-release/constellations.json          dist/ 2>/dev/null || true
+          cp build-release/constellations.schema.json   dist/ 2>/dev/null || true
+          tar -czf ShaderFun-${{ github.ref_name }}-linux.tar.gz -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShaderFun-linux
+          path: ShaderFun-${{ github.ref_name }}-linux.tar.gz
+
+  # ── macOS ──────────────────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vulkan SDK
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: latest
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Tools, Glslang
+          vulkan-use-cache: true
+
+      - name: Configure
+        # MoltenVK is bundled with the LunarG SDK and provides Vulkan on Metal.
+        # GLFW handles the macOS window/event loop natively.
+        run: cmake -B build-release -S . -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-release --parallel
+
+      - name: Package
+        run: |
+          mkdir dist
+          cp build-release/ShaderFun                    dist/
+          cp -r build-release/shaders                   dist/
+          cp -r build-release/assets                    dist/
+          cp build-release/constellations.json          dist/ 2>/dev/null || true
+          cp build-release/constellations.schema.json   dist/ 2>/dev/null || true
+          tar -czf ShaderFun-${{ github.ref_name }}-macos.tar.gz -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShaderFun-macos
+          path: ShaderFun-${{ github.ref_name }}-macos.tar.gz
+
+  # ── GitHub Release (attaches all three zips) ───────────────────────────────
+  publish:
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

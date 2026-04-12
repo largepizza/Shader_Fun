@@ -15,7 +15,7 @@
 #include <cmath>
 
 // ── Maximum satellites per frame ──────────────────────────────────────────────
-static constexpr uint32_t MAX_SATELLITES = 200'000;
+static constexpr uint32_t MAX_SATELLITES = 1'000'000;
 
 // ── Satellite attitude model ───────────────────────────────────────────────────
 enum class AttitudeMode
@@ -97,6 +97,7 @@ struct ConstellationConfig
     bool alignTerminator = false; // Disk: derive incl+raan from sunDirECI at init time
     int numRings = 1;             // Disk: number of concentric rings (1 = single ring)
     float ringSpacingM = 0.0f;    // Disk: altitude step between consecutive rings (meters)
+    bool highlight = false;       // highlight mode: show all sats at fixed brightness, ignoring lighting
     // Populated by initConstellation():
     uint32_t orbitStart = 0; // first index into satOrbits[]
     uint32_t orbitCount = 0; // number of orbits belonging to this constellation
@@ -253,6 +254,7 @@ struct SatOrbit
     glm::vec3 tumbleAxis;               // fixed body tumble axis (unit vector in ECI)
     bool alignTerminator;               // if true, incl/raan are recomputed from sunDirECI each frame
     float targetTerminatorAngle = 0.0f; // TargetedReflector: angle (rad) along the terminator great-circle
+    uint32_t constIdx = 0;              // index into constellations[] — set by buildOrbits()
                                         // that selects the ground target this mirror aims at.
                                         // Terminator basis: t1=cross(sunDir,ref), t2=cross(sunDir,t1).
                                         // Target = kEarthRadius × (cos(angle)×t1 + sin(angle)×t2).
@@ -404,9 +406,9 @@ private:
         KB_SLOWER = 2,
         KB_FASTER = 3,
         KB_REVERSE = 4,
-        KB_MOVE_BOOST = 5,    // held
-        KB_MOVE_FINE = 6,     // held
-        KB_CINEMATIC = 7,     // event — toggles camera drift mode while panning
+        KB_MOVE_BOOST = 5, // held
+        KB_MOVE_FINE = 6,  // held
+        KB_CINEMATIC = 7,  // event — toggles camera drift mode while panning
         KB_COUNT = 8,
     };
 
@@ -457,13 +459,14 @@ private:
     // Cinematic drift mode (toggled by KB_CINEMATIC while RMB is held).
     // Mouse adds force to velocity instead of directly rotating; velocity coasts and decays.
     // Mode is cleared automatically when RMB is released.
-    bool  cinematicMode     = false; // toggle state
-    float cinematicYawVel   = 0.0f; // pixels-equivalent/s driving Rodrigues yaw
+    bool cinematicMode = false;     // toggle state
+    float cinematicYawVel = 0.0f;   // pixels-equivalent/s driving Rodrigues yaw
     float cinematicPitchVel = 0.0f; // pixels-equivalent/s driving elDeg pitch
-    bool  cinematicActive   = false; // true last frame — used to detect transition-out
+    bool cinematicActive = false;   // true last frame — used to detect transition-out
 
     // ── UI hover state (one-frame lag) ────────────────────────────────────────
-    std::vector<bool> hovConst; // one entry per constellation; sized in loadDefinitions()
+    std::vector<bool> hovConst;          // one entry per constellation; sized in loadDefinitions()
+    std::vector<bool> hovHighlightConst; // highlight button hover state, parallel to hovConst
     bool hovTimeSlower = false;
     bool hovTimePause = false;
     bool hovTimeFaster = false;

@@ -87,6 +87,15 @@ const float HORIZON_EL   = -0.01;       // cull if elevation < ~0.6° below hori
 const float REF_RANGE    = 500000.0;    // 500 km reference distance for 1/r² normalisation
 const float VIS_THRESH   = 0.008;       // flare intensity below this → invisible/clipped
 
+// ── Highlight mode ────────────────────────────────────────────────────────────
+// When sat.diffuse > 1.0 the CPU has flagged this satellite for highlight mode
+// (constellation census view).  All above-horizon satellites in the constellation
+// are rendered at a fixed intensity, bypassing shadow, daytime suppression, and
+// attitude-dependent specular so the full orbital distribution is always visible.
+// HIGHLIGHT_FLARE ≈ magnitude 5.3 — clearly visible without being blinding.
+const float HIGHLIGHT_SENTINEL = 1.5;  // diffuse values above this trigger the mode
+const float HIGHLIGHT_FLARE    = 0.05; // fixed effectFlare for every highlighted sat
+
 // ── Brightness scale ──────────────────────────────────────────────────────────
 // Global linear multiplier applied to every satellite's computed flux before
 // the visibility threshold and point-size calculations.
@@ -101,7 +110,7 @@ const float VIS_THRESH   = 0.008;       // flare intensity below this → invisi
 //
 // IMPORTANT: kBrightnessScale in SatelliteSim.cpp must mirror this value
 // so the CPU-side magnitude readout stays consistent with the GPU render.
-const float BRIGHTNESS_SCALE = 4.0;
+const float BRIGHTNESS_SCALE = 3.0;
 
 // ── Magnitude calibration ─────────────────────────────────────────────────────
 // Apparent magnitude is derived from effectFlare via the photometric scale:
@@ -190,6 +199,21 @@ void main() {
     enu.y = dot(rel, pc.enuY.xyz);  // North
     enu.z = dot(rel, pc.enuZ.xyz);  // Up
     vec3 skyDir = normalize(enu);
+
+    // ── Highlight mode: fixed-brightness census view ─────────────────────────
+    // CPU sets sat.diffuse = 2.0 when the constellation's highlight flag is on.
+    // Skip all lighting math and emit a uniform dot so every above-horizon
+    // satellite is equally visible regardless of shadow or daytime sky.
+    if (sat.diffuse > HIGHLIGHT_SENTINEL) {
+        float rangeMm  = sat.range / 1.0e6;
+        float baseSize = max(1.5, 2.5 - rangeMm * 0.4);
+        float angSize  = baseSize * 2.5 + 10.0 * log(HIGHLIGHT_FLARE * 54.0);
+        visible[idx].skyDir         = skyDir;
+        visible[idx].flareIntensity = HIGHLIGHT_FLARE;
+        visible[idx].baseColor      = sat.baseColor;
+        visible[idx].angularSize    = angSize;
+        return;
+    }
 
     // ── Distance falloff (inverse-square law, normalised to REF_RANGE) ──────────
     // Physically: reflected flux ∝ 1/r². Clamped at 1.0 so sats closer than

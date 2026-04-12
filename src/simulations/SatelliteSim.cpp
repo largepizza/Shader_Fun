@@ -439,8 +439,11 @@ namespace Pal
     constexpr Clay_Color panelSolid = {12, 12, 13, 245};  // settings window
     constexpr Clay_Color titleBar = {18, 18, 19, 255};    // title / header strip
     constexpr Clay_Color sectionHdr = {22, 22, 23, 130};  // section divider strip
-    constexpr Clay_Color rowEnabled = {45, 10, 10, 180};  // enabled constellation row
-    constexpr Clay_Color rowDisabled = {16, 16, 17, 160}; // disabled constellation row
+    constexpr Clay_Color rowEnabled = {45, 10, 10, 180};      // enabled constellation row
+    constexpr Clay_Color rowDisabled = {16, 16, 17, 160};     // disabled constellation row
+    constexpr Clay_Color rowHighlight = {35, 30, 8, 180};     // highlighted constellation row
+    constexpr Clay_Color btnHighlight = {160, 120, 15, 240};  // HLT active (amber)
+    constexpr Clay_Color btnHighlightHv = {110, 85, 10, 230}; // HLT hovered
     constexpr Clay_Color listenRow = {50, 10, 10, 185};   // keybind capture row
     // Buttons
     constexpr Clay_Color btnIdle = {30, 30, 31, 210};      // default button
@@ -968,8 +971,10 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                     ConstellationConfig &c = constellations[ci];
                     snprintf(constCntBuf[ci], sizeof(constCntBuf[ci]), "%u", c.orbitCount);
 
-                    bool hov = ci < (int)hovConst.size() && hovConst[ci];
-                    Clay_Color rowBg = c.enabled ? Pal::rowEnabled : Pal::rowDisabled;
+                    bool hov    = ci < (int)hovConst.size()          && hovConst[ci];
+                    bool hovHlt = ci < (int)hovHighlightConst.size() && hovHighlightConst[ci];
+                    Clay_Color rowBg = c.highlight ? Pal::rowHighlight
+                                                   : (c.enabled ? Pal::rowEnabled : Pal::rowDisabled);
                     CLAY(CLAY_IDI("ConstRow", ci), {.layout = {
                                                         .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(24)},
                                                         .padding = {4, 4, 3, 3},
@@ -979,6 +984,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                                                     .backgroundColor = rowBg,
                                                     .cornerRadius = CLAY_CORNER_RADIUS(3)})
                     {
+                        // ── ON/OFF toggle ────────────────────────────────────
                         Clay_Color btnBg = c.enabled
                                                ? Pal::btnAccent
                                                : (hov ? Pal::btnAccentHv : Pal::btnIdle);
@@ -998,6 +1004,28 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                             if (hov && inp.lmbPressed)
                                 c.enabled = !c.enabled;
                             CLAY_TEXT(c.enabled ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
+                                      CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(10)}));
+                        }
+                        // ── Highlight toggle ─────────────────────────────────
+                        Clay_Color hltBg = c.highlight
+                                               ? Pal::btnHighlight
+                                               : (hovHlt ? Pal::btnHighlightHv : Pal::btnIdle);
+                        CLAY(CLAY_IDI("ConstHltBtn", ci), {.layout = {
+                                                               .sizing = {CLAY_SIZING_FIXED(30), CLAY_SIZING_FIXED(18)},
+                                                               .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                           .backgroundColor = hltBg,
+                                                           .cornerRadius = CLAY_CORNER_RADIUS(3)})
+                        {
+                            {
+                                bool n = Clay_Hovered();
+                                sndRollover(n, hovHlt);
+                                sndClick(n);
+                                if (ci < (int)hovHighlightConst.size())
+                                    hovHighlightConst[ci] = n;
+                            }
+                            if (hovHlt && inp.lmbPressed)
+                                c.highlight = !c.highlight;
+                            CLAY_TEXT(CLAY_STRING("HLT"),
                                       CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(10)}));
                         }
                         CLAY(CLAY_IDI("ConstName", ci), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}}})
@@ -1383,6 +1411,24 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                     CLAY_TEXT(CLAY_STRING("shadertoy.com/view/4sX3Rs"),
                               CLAY_TEXT_CONFIG({.textColor = Pal::textHint, .fontSize = fs(11)}));
                 }
+
+                CLAY(CLAY_ID("AttrDiv1"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                                      .padding = {0, 0, 2, 2}},
+                                           .backgroundColor = {30, 30, 32, 255}}) {}
+
+                CLAY(CLAY_ID("Attr2"), {.layout = {
+                                            .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                                            .padding = {6, 6, 5, 5},
+                                            .childGap = 4,
+                                            .layoutDirection = CLAY_TOP_TO_BOTTOM}})
+                {
+                    CLAY_TEXT(CLAY_STRING("Icons"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(12)}));
+                    CLAY_TEXT(CLAY_STRING("\"HackerNoon's Pixel Icon Library"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textDim, .fontSize = fs(11)}));
+                    CLAY_TEXT(CLAY_STRING("https://github.com/hackernoon/pixel-icon-library"),
+                              CLAY_TEXT_CONFIG({.textColor = Pal::textHint, .fontSize = fs(11)}));
+                }
             }
         }
     }
@@ -1536,6 +1582,26 @@ void SatelliteSim::cleanup(VkDevice device)
     {
         vkFreeMemory(device, noiseTexMem, nullptr);
         noiseTexMem = VK_NULL_HANDLE;
+    }
+    if (moonSampler)
+    {
+        vkDestroySampler(device, moonSampler, nullptr);
+        moonSampler = VK_NULL_HANDLE;
+    }
+    if (moonTexView)
+    {
+        vkDestroyImageView(device, moonTexView, nullptr);
+        moonTexView = VK_NULL_HANDLE;
+    }
+    if (moonTex)
+    {
+        vkDestroyImage(device, moonTex, nullptr);
+        moonTex = VK_NULL_HANDLE;
+    }
+    if (moonTexMem)
+    {
+        vkFreeMemory(device, moonTexMem, nullptr);
+        moonTexMem = VK_NULL_HANDLE;
     }
     vkDestroyBuffer(device, glowBuf, nullptr);
     vkFreeMemory(device, glowMem, nullptr);
@@ -2429,6 +2495,7 @@ void SatelliteSim::loadDefinitions()
     }
 
     hovConst.assign(constellations.size(), false);
+    hovHighlightConst.assign(constellations.size(), false);
     fprintf(stderr, "[SatelliteSim] Loaded %zu satellite type(s) and %zu constellation(s)"
                     " from %s\n",
             satTypes.size(), constellations.size(), jsonPath.c_str());
@@ -2456,7 +2523,7 @@ void SatelliteSim::loadHardcoded()
          10.0f,                                      // ~10 m² bus + visor
          {AttitudeMode::NadirPointing, 18.0f, 1.0f}, // very sharp specular (flat mirror-like face)
          {AttitudeMode::Perpendicular, 0.0f, 0.0f},  // no significant secondary surface
-         0.02f,                                      // no diffuse floor (visor-darkened)
+         0.01f,                                      // no diffuse floor (visor-darkened)
          0.05f},                                     // mirrorFrac: polished phased-array glass → mag ~-2.7 at perfect alignment
         {                                            // 1 — LEO broadband (OneWeb/Kuiper/Xingwang/Telesat): sun-tracking panels
          "LEO Broadband",
@@ -2464,7 +2531,7 @@ void SatelliteSim::loadHardcoded()
          5.0f,                  // ~12 m² typical LEO broadband bus + panels
          {AttitudeMode::SunTracking, 18.0f, 1.0f},
          {AttitudeMode::Perpendicular, 0.0f, 0.0f},
-         0.02f,  // no diffuse floor
+         0.01f,  // no diffuse floor
          0.02f}, // mirrorFrac: moderate — sun-tracking panels occasionally flash
         {        // 2 — GEO Comsat: large sun-tracking panels + body radiators facing away from Earth
          "GEO Comsat",
@@ -2495,7 +2562,7 @@ void SatelliteSim::loadHardcoded()
          ai_sat_panel_area,                        // ~15 m² — Starlink-class bus + extra radiator area
          {AttitudeMode::SunTracking, 25.0f, 1.0f}, // phased-array/compute face toward Earth
          {AttitudeMode::AntiNadir, 10.0f, 0.25f},  // large radiator panels face deep space
-         0.001f,                                   // minimal structural body scatter
+         0.04f,                                    // minimal structural body scatter
          0.01f},                                   // mirrorFrac: similar to Starlink — polished compute face
         {                                          // 5 — Reflect Orbital mirror (speculative, 55 m diameter flat mirror).
          // FlatMirror45: normal = normalize(sunDir + satNadir).
@@ -2516,7 +2583,7 @@ void SatelliteSim::loadHardcoded()
          2376.0f,                                         // 55 m diameter mirror area (m²)
          {AttitudeMode::TargetedReflector, 200.0f, 1.0f}, // near-perfect flat mirror; tight but not laser-narrow lobe
          {AttitudeMode::Perpendicular, 0.0f, 0.0f},       // no secondary surface
-         0.001f,                                          // no diffuse scatter (mirror absorbs nothing)
+         0.02f,                                           // no diffuse scatter (mirror absorbs nothing)
          0.97f},                                          // mirrorFrac: near-perfect specular mirror
         {                                                 // 6 — Space debris: defunct satellites, rocket bodies, fragments.
          // Tumbling attitude — chaotic rotation around a random body axis.
@@ -2527,7 +2594,7 @@ void SatelliteSim::loadHardcoded()
          1.0f,                                      // ~3 m² effective cross-section (fragment to small bus)
          {AttitudeMode::Tumbling, 6.0f, 1.0f},      // rough diffuse tumble; occasional glint
          {AttitudeMode::Perpendicular, 6.0f, 0.0f}, // no secondary surface
-         0.01f,                                     // high diffuse floor — structural clutter scatters everywhere
+         0.001f,                                    // high diffuse floor — structural clutter scatters everywhere
          0.03f},                                    // rare metallic glints from exposed foil or polished surfaces
     };
 
@@ -2667,6 +2734,7 @@ void SatelliteSim::loadHardcoded()
     };
 
     hovConst.assign(constellations.size(), false);
+    hovHighlightConst.assign(constellations.size(), false);
 }
 
 // ─── buildOrbits ──────────────────────────────────────────────────────────────
@@ -2764,6 +2832,12 @@ void SatelliteSim::buildOrbits()
         }
 
         c.orbitCount = (uint32_t)satOrbits.size() - c.orbitStart;
+
+        // Stamp constIdx on every orbit that belongs to this constellation so
+        // updatePositions() can look up highlight/enabled state by orbit index.
+        uint32_t ci = (uint32_t)(&c - constellations.data());
+        for (uint32_t oi = c.orbitStart; oi < c.orbitStart + c.orbitCount; ++oi)
+            satOrbits[oi].constIdx = ci;
     }
     // 67 Right here
 
@@ -3156,7 +3230,10 @@ void SatelliteSim::updatePositions(double t, float dt)
             satInputData[i].specExp1 = type.secondary.specExp;
             satInputData[i].crossSection = sqrtf(type.crossSectionM2 / 10.0f);
             satInputData[i].w1 = type.secondary.weight;
-            satInputData[i].diffuse = type.diffuse;
+            // Highlight sentinel: diffuse > 1.0 is out-of-range physically; the shader
+            // detects it and renders the satellite at a fixed brightness, bypassing
+            // shadow, daytime suppression, and attitude-dependent specular entirely.
+            satInputData[i].diffuse = constellations[orb.constIdx].highlight ? 2.0f : type.diffuse;
             satInputData[i].mirrorFrac = type.mirrorFrac;
 
             if (el > -0.01f)
