@@ -75,7 +75,7 @@ All keybindings except right-click and WASD are rebindable in the Settings panel
 | Starlink Gen2 | 30,480 | 525 km | 53.2° | Walker |
 | OneWeb | 648 | 1,200 km | 87.9° | Walker |
 | Amazon LEO (Kuiper) | 7,742 | 630 km | 51.9° | Walker |
-| Xingwang (GW) | 13,920 | 508 km | 85° | Walker |
+| Guowang (GW) | 13,920 | 508 km | 85° | Walker |
 | ISS | 1 | 408 km | 51.6° | Walker |
 | SpaceX AI Sat (ODC) | 20,000 | 575–1,925 km | SSO | Disk, alignTerminator |
 | Reflect Orbital | 1,000 | 500 km | SSO | Disk, alignTerminator |

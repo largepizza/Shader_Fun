@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
-project(ShaderFun VERSION 0.1 LANGUAGES CXX)
+
+# Single source of truth for the version — edit VERSION to cut a release.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" APP_VERSION)
+string(STRIP "${APP_VERSION}" APP_VERSION)           # remove trailing newline
+string(REPLACE "." "_" VERSION_UNDERSCORED "${APP_VERSION}")
+set(EXE_BASENAME "SAT_LIGHT_SIM_V_${VERSION_UNDERSCORED}")  # e.g. SAT_LIGHT_SIM_V_1_0_0
+
+project(ShaderFun VERSION ${APP_VERSION} LANGUAGES CXX)
+message(STATUS "Building ${EXE_BASENAME}")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -80,6 +88,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 add_executable(ShaderFun ${SOURCES})
+set_target_properties(ShaderFun PROPERTIES OUTPUT_NAME "${EXE_BASENAME}")
 target_include_directories(ShaderFun PRIVATE src ${clay_SOURCE_DIR} ${stb_SOURCE_DIR} ${miniaudio_SOURCE_DIR})
 target_link_libraries(ShaderFun PRIVATE Vulkan::Vulkan glfw glm::glm nlohmann_json::nlohmann_json)
 

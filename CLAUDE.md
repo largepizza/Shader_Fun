@@ -186,7 +186,7 @@ Each `SatelliteType` composes two surfaces + a diffuse floor:
 | Starlink Gen2 | 30,480 | 525 | 53.2° | Walker |
 | OneWeb | 648 | 1,200 | 87.9° | Walker |
 | Amazon LEO | 7,742 | 630 | 51.9° | Walker |
-| Xingwang | 13,920 | 508 | 85° | Walker |
+| Guowang | 13,920 | 508 | 85° | Walker |
 | ISS | 1 | 408 | 51.6° | Walker |
 | SpaceX AI Sat | 20,000 | 575–1,925 km | SSO | Disk+terminator |
 | Reflect Orbital | 1,000 | 500 | SSO | Disk+terminator, **disabled** |

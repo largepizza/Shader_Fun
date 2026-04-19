@@ -434,17 +434,17 @@ static const char *keyDisplayName(int key)
 namespace Pal
 {
     // Backgrounds
-    constexpr Clay_Color panelBg = {8, 8, 9, 210};        // floating panel
-    constexpr Clay_Color panelBgFade = {8, 8, 9, 180};    // panel, slightly transparent
-    constexpr Clay_Color panelSolid = {12, 12, 13, 245};  // settings window
-    constexpr Clay_Color titleBar = {18, 18, 19, 255};    // title / header strip
-    constexpr Clay_Color sectionHdr = {22, 22, 23, 130};  // section divider strip
+    constexpr Clay_Color panelBg = {8, 8, 9, 210};            // floating panel
+    constexpr Clay_Color panelBgFade = {8, 8, 9, 180};        // panel, slightly transparent
+    constexpr Clay_Color panelSolid = {12, 12, 13, 245};      // settings window
+    constexpr Clay_Color titleBar = {18, 18, 19, 255};        // title / header strip
+    constexpr Clay_Color sectionHdr = {22, 22, 23, 130};      // section divider strip
     constexpr Clay_Color rowEnabled = {45, 10, 10, 180};      // enabled constellation row
     constexpr Clay_Color rowDisabled = {16, 16, 17, 160};     // disabled constellation row
     constexpr Clay_Color rowHighlight = {35, 30, 8, 180};     // highlighted constellation row
     constexpr Clay_Color btnHighlight = {160, 120, 15, 240};  // HLT active (amber)
     constexpr Clay_Color btnHighlightHv = {110, 85, 10, 230}; // HLT hovered
-    constexpr Clay_Color listenRow = {50, 10, 10, 185};   // keybind capture row
+    constexpr Clay_Color listenRow = {50, 10, 10, 185};       // keybind capture row
     // Buttons
     constexpr Clay_Color btnIdle = {30, 30, 31, 210};      // default button
     constexpr Clay_Color btnHover = {52, 52, 54, 230};     // hovered button
@@ -504,7 +504,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
             // Mouse input adds to velocity as an impulse (kForce fraction of raw delta).
             // Velocity units: pixels-equivalent — same as dmx/dmy — so it slots straight
             // into the Rodrigues and elDeg formulas below without any unit conversion.
-            const float kForce = 0.2f;
+            const float kForce = 0.06f;
             cinematicYawVel += dmx * kForce;
             cinematicPitchVel += dmy * kForce;
 
@@ -971,7 +971,7 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
                     ConstellationConfig &c = constellations[ci];
                     snprintf(constCntBuf[ci], sizeof(constCntBuf[ci]), "%u", c.orbitCount);
 
-                    bool hov    = ci < (int)hovConst.size()          && hovConst[ci];
+                    bool hov = ci < (int)hovConst.size() && hovConst[ci];
                     bool hovHlt = ci < (int)hovHighlightConst.size() && hovHighlightConst[ci];
                     Clay_Color rowBg = c.highlight ? Pal::rowHighlight
                                                    : (c.enabled ? Pal::rowEnabled : Pal::rowDisabled);
@@ -2657,7 +2657,7 @@ void SatelliteSim::loadHardcoded()
          OrbitDistribution::Walker},
 
         // China Xingwang/GW (CASC/CASIC) — planned: ~13,952 sats; 80 planes × 174 = 13,920
-        {"Xingwang",
+        {"Guowang",
          508'000.0f,          // altM:      508 km
          glm::radians(85.0f), // incl:      85° — near-polar
          80,                  // numPlanes: orbital planes

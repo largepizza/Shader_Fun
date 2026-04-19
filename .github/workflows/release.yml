@@ -1,11 +1,12 @@
 name: Release
 
 # Fires on any tag matching v1.2.3 — create one with:
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v1.0.0 && git push origin v1.0.0
+# Can also be triggered manually from the Actions tab.
 on:
   push:
     tags: ["v*.*.*"]
-  workflow_dispatch:   # also lets you trigger manually from the Actions tab
+  workflow_dispatch:
 
 jobs:
   # ── Windows ────────────────────────────────────────────────────────────────
@@ -13,6 +14,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        run: |
+          $v = (Get-Content VERSION).Trim()
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+          echo "archive=SAT_LIGHT_SIM_v${v}_Windows" >> $env:GITHUB_OUTPUT
+        shell: pwsh
 
       - name: Install Vulkan SDK
         uses: humbletim/setup-vulkan-sdk@v1.2.1
@@ -29,25 +38,35 @@ jobs:
 
       - name: Package
         run: |
-          mkdir dist
-          Copy-Item build-release/Release/ShaderFun.exe            dist/
-          Copy-Item build-release/Release/shaders                   dist/ -Recurse
-          Copy-Item build-release/Release/assets                    dist/ -Recurse
-          Copy-Item build-release/Release/constellations.json       dist/ -ErrorAction SilentlyContinue
-          Copy-Item build-release/Release/constellations.schema.json dist/ -ErrorAction SilentlyContinue
-          Compress-Archive -Path dist/* -DestinationPath ShaderFun-${{ github.ref_name }}-windows.zip
+          $v   = "${{ steps.ver.outputs.version }}"
+          $vu  = $v -replace '\.','_'
+          $exe = "SAT_LIGHT_SIM_V_${vu}.exe"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "build-release/Release/$exe"                   dist/
+          Copy-Item build-release/Release/shaders                  dist/ -Recurse
+          Copy-Item build-release/Release/assets                   dist/ -Recurse
+          Copy-Item data/constellations.json        dist/
+          Copy-Item data/constellations.schema.json dist/
+          Compress-Archive -Path dist/* -DestinationPath "${{ steps.ver.outputs.archive }}.zip" -Force
         shell: pwsh
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ShaderFun-windows
-          path: ShaderFun-${{ github.ref_name }}-windows.zip
+          name: ${{ steps.ver.outputs.archive }}
+          path: ${{ steps.ver.outputs.archive }}.zip
 
   # ── Linux ──────────────────────────────────────────────────────────────────
   build-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        run: |
+          v=$(cat VERSION | tr -d '[:space:]')
+          echo "version=$v"              >> $GITHUB_OUTPUT
+          echo "archive=SAT_LIGHT_SIM_v${v}_Linux" >> $GITHUB_OUTPUT
 
       - name: Install Vulkan SDK
         uses: humbletim/setup-vulkan-sdk@v1.2.1
@@ -72,24 +91,34 @@ jobs:
 
       - name: Package
         run: |
+          v="${{ steps.ver.outputs.version }}"
+          vu="${v//./_}"
+          exe="SAT_LIGHT_SIM_V_${vu}"
           mkdir dist
-          cp build-release/ShaderFun                    dist/
-          cp -r build-release/shaders                   dist/
-          cp -r build-release/assets                    dist/
-          cp build-release/constellations.json          dist/ 2>/dev/null || true
-          cp build-release/constellations.schema.json   dist/ 2>/dev/null || true
-          tar -czf ShaderFun-${{ github.ref_name }}-linux.tar.gz -C dist .
+          cp "build-release/$exe"                     dist/
+          cp -r build-release/shaders                 dist/
+          cp -r build-release/assets                  dist/
+          cp data/constellations.json        dist/
+          cp data/constellations.schema.json dist/
+          tar -czf "${{ steps.ver.outputs.archive }}.tar.gz" -C dist .
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ShaderFun-linux
-          path: ShaderFun-${{ github.ref_name }}-linux.tar.gz
+          name: ${{ steps.ver.outputs.archive }}
+          path: ${{ steps.ver.outputs.archive }}.tar.gz
 
   # ── macOS ──────────────────────────────────────────────────────────────────
   build-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        run: |
+          v=$(cat VERSION | tr -d '[:space:]')
+          echo "version=$v"              >> $GITHUB_OUTPUT
+          echo "archive=SAT_LIGHT_SIM_v${v}_macOS" >> $GITHUB_OUTPUT
 
       - name: Install Vulkan SDK
         uses: humbletim/setup-vulkan-sdk@v1.2.1
@@ -99,8 +128,6 @@ jobs:
           vulkan-use-cache: true
 
       - name: Configure
-        # MoltenVK is bundled with the LunarG SDK and provides Vulkan on Metal.
-        # GLFW handles the macOS window/event loop natively.
         run: cmake -B build-release -S . -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
@@ -108,20 +135,23 @@ jobs:
 
       - name: Package
         run: |
+          v="${{ steps.ver.outputs.version }}"
+          vu="${v//./_}"
+          exe="SAT_LIGHT_SIM_V_${vu}"
           mkdir dist
-          cp build-release/ShaderFun                    dist/
-          cp -r build-release/shaders                   dist/
-          cp -r build-release/assets                    dist/
-          cp build-release/constellations.json          dist/ 2>/dev/null || true
-          cp build-release/constellations.schema.json   dist/ 2>/dev/null || true
-          tar -czf ShaderFun-${{ github.ref_name }}-macos.tar.gz -C dist .
+          cp "build-release/$exe"                     dist/
+          cp -r build-release/shaders                 dist/
+          cp -r build-release/assets                  dist/
+          cp data/constellations.json        dist/
+          cp data/constellations.schema.json dist/
+          tar -czf "${{ steps.ver.outputs.archive }}.tar.gz" -C dist .
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ShaderFun-macos
-          path: ShaderFun-${{ github.ref_name }}-macos.tar.gz
+          name: ${{ steps.ver.outputs.archive }}
+          path: ${{ steps.ver.outputs.archive }}.tar.gz
 
-  # ── GitHub Release (attaches all three zips) ───────────────────────────────
+  # ── GitHub Release (attaches all three archives) ───────────────────────────
   publish:
     needs: [build-windows, build-linux, build-macos]
     runs-on: ubuntu-latest
