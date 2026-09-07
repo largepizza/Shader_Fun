@@ -2,6 +2,7 @@
 #include "../UIRenderer.h"
 #include "../AudioSystem.h"
 #include "../Paths.h"
+#include "../Log.h"
 #include "version.h"
 #include "clay.h"
 #include "star_catalog.h"
@@ -11,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <algorithm>
@@ -385,7 +387,9 @@ void SatelliteSim::onResize(VulkanContext &ctx)
 {
     vkDestroyPipeline(ctx.device, skyBgPipeline, nullptr);
     skyBgPipeline = VK_NULL_HANDLE;
-    createSkyBgPipeline(ctx);
+    vkDestroyPipeline(ctx.device, skyBgMinimalPipeline, nullptr);
+    skyBgMinimalPipeline = VK_NULL_HANDLE;
+    createSkyBgPipeline(ctx); // recreates both skyBgPipeline and skyBgMinimalPipeline
 
     // Resolution scaling: low-res target is sized off ctx.swapExtent too, so it needs the same
     // destroy+recreate treatment as skyBgPipeline just above.
@@ -561,6 +565,25 @@ void SatelliteSim::onResize(VulkanContext &ctx)
 // pass-duration buckets into gpuMsSmoothed[].  VulkanContext::kTimestampCount carries the
 // authoritative slot table; this function, kPerfLabels[] in SatelliteSimUI.cpp, and the JSON
 // keys in savePerfSnapshot() must all stay in sync with it and with each other.
+// Diagnostic env-var gate (checked once, cached). Used to bisect the macOS/MoltenVK per-frame
+// GPU stall by removing whole passes from the command buffer. All default off — normal builds
+// are unaffected.
+static bool dbgEnv(const char *name)
+{
+    // A tiny cache keyed by pointer identity is enough — call sites pass string literals.
+    struct E { const char *k; bool v; };
+    static E cache[8];
+    static int n = 0;
+    for (int i = 0; i < n; ++i)
+        if (cache[i].k == name)
+            return cache[i].v;
+    const char *e = std::getenv(name);
+    bool v = e && e[0] == '1';
+    if (n < 8)
+        cache[n++] = {name, v};
+    return v;
+}
+
 void SatelliteSim::updateGpuTimingStats(VulkanContext &ctx)
 {
     if (!ctx.timestampsReady)
@@ -1968,6 +1991,15 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
     // ground" reads the result instead of re-deriving it: cloud_march.comp's beam occlusion (which
     // used to march the DEM per beam per pixel), and — from the next step — every volumetric
     // layer's own far bound. Depends on nothing else this frame, only the camera.
+    //
+    // Knockout bit 1024 skips the ENTIRE block — dispatch AND both per-frame layout barriers.
+    // createSceneDepthResources() cleared the image to kNoSurfaceT once, and nothing else writes
+    // it, so a skipped frame leaves a valid "nothing occludes anywhere" buffer in
+    // SHADER_READ_ONLY_OPTIMAL (exactly what every consumer's descriptor expects). Removing the
+    // two barriers matters on MoltenVK/older-Metal, where each barrier forces a command-encoder
+    // restart that can dominate the frame — see Potato preset. (Previously bit 1024 only made the
+    // shader early-return; the dispatch + barriers still ran every frame.)
+    if ((debugDisableMask & 1024u) == 0u)
     {
         SceneDepthPC dpc{};
         dpc.skyView = camera.viewMatrix();
@@ -2178,6 +2210,7 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
     // ── Dispatch: cloud_march.comp — half-resolution cloud/cirrus march (C15-perf) ──────────
     // Runs at half ctx.swapExtent, writing cloudMarchTargetA/B; sat_sky.frag samples them
     // (skyDescSet bindings 10/11) in place of the old inline cirrusMarch()/cloudMarch() calls.
+    if (!dbgEnv("SATLIGHTSIM_SKIP_CLOUDMARCH"))
     {
         CloudMarchPC cpc{};
         cpc.skyView = camera.viewMatrix();
@@ -2860,16 +2893,46 @@ void SatelliteSim::recordDraw(VkCommandBuffer cmd, VulkanContext &ctx, float /*d
     // depth-occlusion tradeoff.
     if (renderScale >= 0.999f)
     {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyBgPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                skyBgPipeLayout, 0, 1, &skyDescSet, 0, nullptr);
-        vkCmdPushConstants(cmd, skyBgPipeLayout,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(pc), &pc);
-        vkCmdDraw(cmd, 3, 1, 0, 0);
+        if (!dbgEnv("SATLIGHTSIM_SKIP_SKYBG")) // diagnostic: drop the fullscreen sky/ground draw
+        {
+            // Potato preset (bit 262144): swap in the minimal fragment shader. sat_sky.frag is
+            // ~490 ms/frame on a 2015 AMD GPU via MoltenVK — the whole frame — and no quality
+            // slider or knockout reduces it. Same layout / descriptor set / push constant.
+            VkPipeline skyPipe = (debugDisableMask & 262144u) ? skyBgMinimalPipeline : skyBgPipeline;
+            {
+                // Always-on breadcrumb (into satlight_log.txt) for the intermittent Potato
+                // slow-start bug — see [[potato-mode-intermittent-slow-start]]. Logs only on a
+                // change, so it costs nothing per frame but is always present when it recurs.
+                static VkPipeline lastSkyPipe = VK_NULL_HANDLE;
+                static uint32_t lastSkyMask = 0xFFFFFFFFu;
+                if (skyPipe != lastSkyPipe || debugDisableMask != lastSkyMask)
+                {
+                    Log::line("sky pipeline: " +
+                              std::string((skyPipe == skyBgMinimalPipeline) ? "MINIMAL" : "FULL sat_sky.frag") +
+                              " (mask " + std::to_string(debugDisableMask) +
+                              ", renderScale " + std::to_string(renderScale) + ")");
+                    lastSkyPipe = skyPipe;
+                    lastSkyMask = debugDisableMask;
+                }
+                static uint64_t dbgSkyFrame = 0;
+                if (dbgEnv("SATLIGHTSIM_FRAME_TRACE") && (dbgSkyFrame++ % 60 == 0))
+                    fprintf(stderr, "[sky] mask=%u rs=%.3f minimalBit=%d pipe=%s(%p) full=%p min=%p\n",
+                            debugDisableMask, renderScale, (debugDisableMask & 262144u) ? 1 : 0,
+                            (skyPipe == skyBgMinimalPipeline) ? "MIN" : "FULL", (void *)skyPipe,
+                            (void *)skyBgPipeline, (void *)skyBgMinimalPipeline);
+            }
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyPipe);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    skyBgPipeLayout, 0, 1, &skyDescSet, 0, nullptr);
+            vkCmdPushConstants(cmd, skyBgPipeLayout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(pc), &pc);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+        }
         // Isolates the sky/terrain/ocean/cloud-composite fragment shader's own cost from the
         // satellite + star point draws that follow (previously all three were lumped into one
-        // timestamp bucket in App.cpp — see VulkanContext::kTimestampCount).
+        // timestamp bucket in App.cpp — see VulkanContext::kTimestampCount). Written even when the
+        // draw above is diagnostically skipped, so the query pool never has an unwritten slot.
         ctx.writeTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 6);
     }
 
@@ -3021,6 +3084,7 @@ void SatelliteSim::cleanup(VkDevice device)
     // ── Flare + draw + sky pipelines ───────────────────────────────────────────
     vkDestroyPipeline(device, compPipeline, nullptr);
     vkDestroyPipeline(device, skyBgPipeline, nullptr);
+    vkDestroyPipeline(device, skyBgMinimalPipeline, nullptr);
     destroySkyLowResResources(device);
     vkDestroyPipeline(device, drawPipeline, nullptr);
     vkDestroyPipelineLayout(device, compPipeLayout, nullptr);
@@ -3587,10 +3651,14 @@ void SatelliteSim::finishIntro(bool wasSkipped)
                 newPreset = GraphicsPreset::Low;
             else if (graphicsPreset == GraphicsPreset::Low)
                 newPreset = GraphicsPreset::Planetarium;
+            else if (graphicsPreset == GraphicsPreset::Planetarium)
+                newPreset = GraphicsPreset::Potato;
         }
         else if (avgMs < kTargetMs * 0.4f)
         {
-            if (graphicsPreset == GraphicsPreset::Low)
+            if (graphicsPreset == GraphicsPreset::Potato)
+                newPreset = GraphicsPreset::Planetarium;
+            else if (graphicsPreset == GraphicsPreset::Low)
                 newPreset = GraphicsPreset::Medium;
             else if (graphicsPreset == GraphicsPreset::Medium)
                 newPreset = GraphicsPreset::High;
@@ -4973,7 +5041,7 @@ void SatelliteSim::createSceneDepthResources(VulkanContext &ctx)
     uint32_t h = (ctx.swapExtent.height + 1) / 2;
 
     ctx.createImage(w, h, VK_FORMAT_R32_SFLOAT,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                     sceneDepthImg, sceneDepthMem);
     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vci.image = sceneDepthImg;
@@ -4999,14 +5067,25 @@ void SatelliteSim::createSceneDepthResources(VulkanContext &ctx)
         vkCreateSampler(ctx.device, &sci, nullptr, &sceneDepthSampler);
     }
 
-    // Establish SHADER_READ_ONLY_OPTIMAL as the starting layout — what the descriptor writes
-    // declare and what recordCompute's per-frame pre-dispatch barrier transitions FROM. Same
-    // one-time-setup role createCloudMarchResources' matching barriers play, for both first init
-    // and after an onResize recreation.
+    // Clear to kNoSurfaceT (1e30 = "no terrain/ocean anywhere on any ray") ONCE here, then
+    // establish SHADER_READ_ONLY_OPTIMAL — the layout the descriptor writes declare and that
+    // recordCompute's per-frame pre-dispatch barrier transitions FROM. The clear matters because
+    // knockout bit 1024 now skips the scene_depth dispatch (and its two per-frame barriers)
+    // entirely on the CPU side rather than early-returning in the shader — a skipped dispatch
+    // leaves whatever is here, so it must be a valid "nothing occludes" buffer. Same one-time-
+    // setup role createCloudMarchResources' matching barriers play, for first init and onResize.
     auto cmd = ctx.beginOneTimeCommands();
-    ctx.imageBarrier(cmd, sceneDepthImg, 0, VK_ACCESS_SHADER_READ_BIT,
-                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    ctx.imageBarrier(cmd, sceneDepthImg, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkClearColorValue noSurface{};
+    noSurface.float32[0] = noSurface.float32[1] = noSurface.float32[2] = noSurface.float32[3] = 1e30f;
+    VkImageSubresourceRange fullColor{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(cmd, sceneDepthImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         &noSurface, 1, &fullColor);
+    ctx.imageBarrier(cmd, sceneDepthImg, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     ctx.endOneTimeCommands(cmd);
 }
 
@@ -6251,6 +6330,21 @@ void SatelliteSim::createSkyBgPipeline(VulkanContext &ctx)
 
     if (vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &ci, nullptr, &skyBgPipeline) != VK_SUCCESS)
         throw std::runtime_error("SatelliteSim: failed to create sky background pipeline");
+
+    // Minimal variant — identical state, same layout/render pass, cheap fragment module. Used by
+    // the Potato preset (debugDisableMask bit 262144) where the full sat_sky.frag is too slow.
+    {
+        if (std::getenv("SATLIGHTSIM_FRAME_TRACE"))
+            fprintf(stderr, "[sky] createSkyBgPipeline: recreating both sky pipelines\n");
+        VkShaderModule minFrag = ctx.loadShader("shaders/sat_sky_minimal.frag.spv");
+        VkPipelineShaderStageCreateInfo minStages[2] = {stages[0], stages[1]};
+        minStages[1].module = minFrag;
+        VkGraphicsPipelineCreateInfo minCi = ci;
+        minCi.pStages = minStages;
+        if (vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &minCi, nullptr, &skyBgMinimalPipeline) != VK_SUCCESS)
+            throw std::runtime_error("SatelliteSim: failed to create minimal sky background pipeline");
+        vkDestroyShaderModule(ctx.device, minFrag, nullptr);
+    }
 
     vkDestroyShaderModule(ctx.device, vert, nullptr);
     vkDestroyShaderModule(ctx.device, frag, nullptr);

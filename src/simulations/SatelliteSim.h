@@ -117,6 +117,10 @@ enum class GraphicsPreset
     High,        // today's tuned defaults
     Ultra,       // uncapped for showcase/screenshots
     Custom,      // user has hand-edited an advanced slider since the last named preset was applied
+    Potato,      // below Planetarium — very weak GPUs / MoltenVK translation. Atmosphere scattering,
+                 // the scene-depth pass, and the beam/sky-glow loops are ALL knocked out; 0.5 render
+                 // scale. Appended after Custom on purpose: the persisted int index (saveSettings
+                 // writes (int)graphicsPreset) of every pre-existing preset stays unchanged.
 };
 
 // ── Orbit distribution type ────────────────────────────────────────────────────
@@ -1492,6 +1496,11 @@ private:
     VkPipeline compPipeline = VK_NULL_HANDLE;
     VkPipelineLayout skyBgPipeLayout = VK_NULL_HANDLE; // sky/ground background
     VkPipeline skyBgPipeline = VK_NULL_HANDLE;
+    // Minimal stand-in used when debugDisableMask bit 262144 is set (Potato preset): sat_sky.frag
+    // is ~490 ms/frame on a 2015 AMD GPU via MoltenVK and no quality knob touches that. Same
+    // pipeline layout / descriptor set / render pass as skyBgPipeline — only the fragment module
+    // differs (shaders/sat_sky_minimal.frag). Created and resized alongside skyBgPipeline.
+    VkPipeline skyBgMinimalPipeline = VK_NULL_HANDLE;
     VkPipelineLayout drawPipeLayout = VK_NULL_HANDLE;
     VkPipeline drawPipeline = VK_NULL_HANDLE;
 
@@ -2873,8 +2882,11 @@ private:
                                        // Clouds/Ocean/Terrain/Aurora tabs; off by default so a
                                        // new user's front door is Preset + the handful of
                                        // top-level controls, not 46 developer sliders.
-    bool hovPreset[5] = {};            // one per named preset button (Custom has no button —
-                                       // it's a read-only status, not a click target)
+    bool hovPreset[6] = {};            // one per clickable preset button (Custom has no button —
+                                       // it's a read-only status, not a click target; Potato does)
+    float fpsBadgeEma = 0.0f;          // EMA-smoothed 1/dt for the HUD fps badge, so a true low
+                                       // frame rate reads as a steady number instead of flickering
+                                       // between adjacent integers frame to frame
     bool hovAdvancedToggle = false;
     bool hovReplayIntro = false; // UC3 "Replay Intro" button, Display tab
     // UC3 follow-up: "Play intro on startup" checkbox, Display tab. Persisted (loadSettings/
@@ -3177,4 +3189,4 @@ static constexpr int kIntroControlsIndex = 7;   // WASD / Q-E controls hint
 // Beats 0-6 (through arrival in LEO, where camera motion stops) feed the UC1 benchmark
 // accumulator; the static hold over beats 7-8 isn't representative load, so it's excluded.
 static constexpr float kIntroBenchEndT = songbeat * 8.0f;
-static constexpr const char *kGraphicsPresetNames[] = {"Planetarium", "Low", "Medium", "High", "Ultra", "Custom"};
+static constexpr const char *kGraphicsPresetNames[] = {"Planetarium", "Low", "Medium", "High", "Ultra", "Custom", "Potato"};

@@ -3,6 +3,14 @@
     // Build output goes here. CMake Tools reads this automatically.
     "cmake.buildDirectory": "${workspaceFolder}/build",
 
+    // macOS: portable CMake 3.31.7 (Homebrew's CMake 4.x rejects the older
+    // cmake_minimum_required() in some FetchContent deps). Harmless on Windows —
+    // that path won't exist there, and CMake Tools falls back to PATH.
+    "cmake.cmakePath": "cmake",
+    "cmake.configureEnvironment": {
+        "VULKAN_SDK": "${env:VULKAN_SDK}"
+    },
+
     // Configure the project automatically when you open the folder
     "cmake.configureOnOpen": true,
 

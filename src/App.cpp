@@ -2,7 +2,21 @@
 #include <stdexcept>
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <thread>
+
+// SATLIGHTSIM_FRAME_TRACE=1 → print a per-phase CPU wall-clock breakdown of drawFrame() every
+// 60 frames. Pins down whether the frame is lost in vkWaitForFences (GPU busy), vkQueueSubmit
+// (MoltenVK synchronous encode+submit), vkQueuePresentKHR (compositor/vsync stall), or the
+// command recording itself.
+namespace {
+bool frameTraceEnabled() {
+    static int v = -1;
+    if (v < 0) { const char *e = std::getenv("SATLIGHTSIM_FRAME_TRACE"); v = (e && e[0] == '1') ? 1 : 0; }
+    return v == 1;
+}
+}
 
 App::App(std::unique_ptr<Simulation> s) : sim(std::move(s)) {}
 
@@ -33,6 +47,11 @@ void App::initWindow() {
     // impact and invites fiddling with the window instead of watching it. WIN_W/WIN_H are still
     // passed as the restore size for whenever the player un-maximizes later.
     glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
+    // macOS: render at logical (point) resolution, not the 2x Retina backing size. On the
+    // integrated/older discrete GPUs these machines have, a maximized Retina framebuffer is
+    // ~4x the pixels and the volumetric passes can't keep up. Also makes the fixed-bitmap
+    // font atlas pixel-exact instead of upscaled. No-op on non-Apple platforms.
+    glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
     window = glfwCreateWindow(WIN_W, WIN_H, sim->name(), nullptr, nullptr);
     glfwSetWindowUserPointer(window, this);
     glfwSetFramebufferSizeCallback(window, cbResize);
@@ -61,7 +80,20 @@ void App::mainLoop() {
 }
 
 void App::drawFrame() {
+    const bool ft = frameTraceEnabled();
+    static uint64_t ftFrame = 0;
+    const bool ftPrint = ft && (ftFrame % 60 == 0);
+    double ftT0 = ft ? glfwGetTime() : 0.0, ftPrev = ftT0;
+    auto ftMark = [&](const char *name) {
+        if (!ftPrint) return;
+        double now = glfwGetTime();
+        std::printf("  %-14s %7.1f ms\n", name, (now - ftPrev) * 1000.0);
+        ftPrev = now;
+    };
+    int ftRecreated = 0;
+
     vkWaitForFences(ctx.device, 1, &ctx.fenceFrame, VK_TRUE, UINT64_MAX);
+    ftMark("waitFences");
 
     // Resolve last frame's GPU timestamp queries now that the fence proves the GPU
     // is done with them. Skipped on the very first call: the fence starts pre-signaled
@@ -76,18 +108,25 @@ void App::drawFrame() {
     uint32_t imgIdx;
     VkResult res = vkAcquireNextImageKHR(ctx.device, ctx.swapchain, UINT64_MAX,
                                           ctx.semImageAvailable, VK_NULL_HANDLE, &imgIdx);
+    ftMark("acquire");
     if (res == VK_ERROR_OUT_OF_DATE_KHR) {
         ctx.recreateSwapchain(window);
         sim->onResize(ctx);
         ui.onResize(ctx);
+        if (ft) { ++ftFrame; std::printf("[frame-trace] acquire OUT_OF_DATE -> full swapchain recreate\n"); }
         return;
     }
     if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
         throw std::runtime_error("vkAcquireNextImageKHR failed.");
 
-    // Compute dt
+    // Compute dt. Clamped only against genuine multi-second hitches (first-frame shader
+    // compile, window resize, breakpoint) — NOT against a merely slow GPU. The old 0.05s
+    // (20 fps) ceiling silently pinned the HUD fps badge and every perf snapshot at 20 on
+    // hardware actually running slower, and ran the sim in slow-motion to match. 1.0s (1 fps)
+    // still bounds a pathological stall while letting true frame times through even on very
+    // slow setups (MoltenVK translation on old GPUs can genuinely land here).
     double now = glfwGetTime();
-    float  dt  = std::min((float)(now - lastTime), 0.05f);
+    float  dt  = std::min((float)(now - lastTime), 1.0f);
     lastTime   = now;
 
     // Get current mouse state
@@ -133,6 +172,7 @@ void App::drawFrame() {
 
     // Let the simulation declare its UI elements and read input state via ui.
     sim->buildUI(dt, ui);
+    ftMark("buildUI");
 
     // Record GPU commands
     vkResetFences(ctx.device, 1, &ctx.fenceFrame);
@@ -152,6 +192,7 @@ void App::drawFrame() {
 
     // 1. Simulation compute work (before render pass)
     sim->recordCompute(ctx.commandBuffer, ctx, dt);
+    ftMark("recordCompute");
 
     // 1b. Optional offscreen pre-pass (e.g. a low-res background blitted into the swapchain
     // image ahead of time) — must run before the main render pass begins. Default: no-op.
@@ -189,6 +230,7 @@ void App::drawFrame() {
     sim->recordScreenshotCopy(ctx.commandBuffer, ctx, ctx.swapImages[imgIdx]);
 
     vkEndCommandBuffer(ctx.commandBuffer);
+    ftMark("record rest");
 
     // Submit
     // Includes TRANSFER now (not just COLOR_ATTACHMENT_OUTPUT): a simulation's recordPrePass may
@@ -207,6 +249,7 @@ void App::drawFrame() {
     if (vkQueueSubmit(ctx.graphicsQueue, 1, &si, ctx.fenceFrame) != VK_SUCCESS)
         throw std::runtime_error("vkQueueSubmit failed.");
     submittedOnce = true;
+    ftMark("queueSubmit");
 
     // Present
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
@@ -216,13 +259,30 @@ void App::drawFrame() {
     pi.pSwapchains        = &ctx.swapchain;
     pi.pImageIndices      = &imgIdx;
     res = vkQueuePresentKHR(ctx.graphicsQueue, &pi);
-    if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR || resized ||
-        sim->consumeSwapchainRebuildRequest()) {
+    ftMark("queuePresent");
+    // NOTE: VK_SUBOPTIMAL_KHR is deliberately NOT a trigger here. MoltenVK returns it on almost
+    // every present on Retina/scaled displays, and recreateSwapchain() rebuilds every graphics
+    // pipeline (viewport is baked in) — on MoltenVK that re-converts SPIR-V→MSL and recompiles
+    // sat_sky.frag et al. into fresh MTLRenderPipelineStates, ~hundreds of ms. Doing that every
+    // frame pinned the whole app at a few fps. SUBOPTIMAL still presents correctly; only a real
+    // size change (resized flag) or OUT_OF_DATE actually needs a rebuild. The acquire path above
+    // already ignores SUBOPTIMAL for the same reason.
+    if (res == VK_ERROR_OUT_OF_DATE_KHR || resized || sim->consumeSwapchainRebuildRequest()) {
         resized = false;
         ctx.recreateSwapchain(window);
         sim->onResize(ctx);
         ui.onResize(ctx);
+        ftRecreated = 1;
     }
+    ftMark("post-present");
+
+    if (ftPrint) {
+        std::printf("[frame-trace] frame %llu  present_res=%d  recreated=%d  TOTAL %.1f ms\n\n",
+                    (unsigned long long)ftFrame, (int)res, ftRecreated,
+                    (glfwGetTime() - ftT0) * 1000.0);
+        std::fflush(stdout);
+    }
+    if (ft) ++ftFrame;
 }
 
 void App::cbResize(GLFWwindow* w, int, int) {

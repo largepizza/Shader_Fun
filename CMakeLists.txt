@@ -123,6 +123,14 @@ target_include_directories(SatLightSim PRIVATE src ${clay_SOURCE_DIR} ${stb_SOUR
 find_package(Threads REQUIRED)
 target_link_libraries(SatLightSim PRIVATE Vulkan::Vulkan glfw glm::glm nlohmann_json::nlohmann_json Threads::Threads)
 
+# miniaudio's CoreAudio backend needs these frameworks explicitly. GLFW's target already
+# brings Cocoa/IOKit/CoreFoundation transitively, but not CoreAudio/AudioToolbox — without
+# this the link fails with undefined _AudioObjectGetPropertyData etc.
+if(APPLE)
+    target_link_libraries(SatLightSim PRIVATE
+        "-framework CoreFoundation" "-framework CoreAudio" "-framework AudioToolbox")
+endif()
+
 # Shader compilation
 find_program(GLSLC glslc HINTS "$ENV{VULKAN_SDK}/bin")
 if(NOT GLSLC)

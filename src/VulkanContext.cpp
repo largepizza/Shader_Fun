@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -757,6 +758,17 @@ void VulkanContext::createSyncObjects()
 // ─── GPU timestamp query pool ──────────────────────────────────────────────────
 void VulkanContext::createQueryPool()
 {
+    // Opt-out escape hatch. On MoltenVK over a Metal GPU without MTLCounterSamplingPoint
+    // support (2015-era AMD/Intel), each vkCmdWriteTimestamp forces a command-encoder split;
+    // ~9 per frame can dominate the frame time on that path. SATLIGHTSIM_NO_GPU_TIMERS=1
+    // leaves queryPool null, so every writeTimestamp/resetTimestamps/resolveTimestamps call
+    // below no-ops and the "GPU FRAME BREAKDOWN" HUD simply reads zero.
+    if (const char *e = std::getenv("SATLIGHTSIM_NO_GPU_TIMERS"); e && e[0] == '1')
+    {
+        Log::line("GPU timestamp queries disabled via SATLIGHTSIM_NO_GPU_TIMERS.");
+        return;
+    }
+
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(physicalDevice, &props);
     // A zero period means the device reports no usable timestamp resolution;

@@ -855,7 +855,11 @@ void SatelliteSim::buildRightHudPanel(const UIInput &inp, UIRenderer &ui)
         snprintf(lonBuf, sizeof(lonBuf), "%.1f\xc2\xb0 %c", absLon, obsLonDeg >= 0.0f ? 'E' : 'W');
         float altMeters = altModeSeaLevel ? (obsTerrainH + obsHeightOffset) : obsHeightOffset;
         formatAltitude(altBuf, sizeof(altBuf), altMeters, unitSystem);
-        snprintf(fpsBuf, sizeof(fpsBuf), "%.0f fps", inp.dt > 0.0f ? 1.0f / inp.dt : 0.0f);
+        // inp.dt is the real frame delta (App clamps it only against multi-second hitches), so
+        // 1/dt is the true frame rate. EMA-smooth it so a genuinely low rate shows a steady number.
+        float instFps = inp.dt > 0.0f ? 1.0f / inp.dt : 0.0f;
+        fpsBadgeEma = fpsBadgeEma > 0.0f ? fpsBadgeEma + 0.1f * (instFps - fpsBadgeEma) : instFps;
+        snprintf(fpsBuf, sizeof(fpsBuf), "%.0f fps", fpsBadgeEma);
     }
     Clay_String latStr{false, (int32_t)strlen(latBuf), latBuf};
     Clay_String lonStr{false, (int32_t)strlen(lonBuf), lonBuf};
@@ -1709,11 +1713,13 @@ void SatelliteSim::buildSettingsDisplayTab(const UIInput &inp, UIRenderer &ui)
                                               .childGap = 6,
                                               .layoutDirection = CLAY_LEFT_TO_RIGHT}})
         {
-            static const char *kPresetLabels[5] = {"Planetarium", "Low", "Medium", "High", "Ultra"};
-            static const GraphicsPreset kPresetValues[5] = {
-                GraphicsPreset::Planetarium, GraphicsPreset::Low, GraphicsPreset::Medium,
-                GraphicsPreset::High, GraphicsPreset::Ultra};
-            for (int i = 0; i < 5; ++i)
+            // Display order is cheapest → most expensive; it is independent of the enum's
+            // numeric order (Potato is enum value 6, appended after Custom, but shown first).
+            static const char *kPresetLabels[6] = {"Potato", "Planetarium", "Low", "Medium", "High", "Ultra"};
+            static const GraphicsPreset kPresetValues[6] = {
+                GraphicsPreset::Potato, GraphicsPreset::Planetarium, GraphicsPreset::Low,
+                GraphicsPreset::Medium, GraphicsPreset::High, GraphicsPreset::Ultra};
+            for (int i = 0; i < 6; ++i)
             {
                 bool isActive = graphicsPreset == kPresetValues[i];
                 Clay_Color btnBg = isActive ? Pal::btnAccent : (hovPreset[i] ? Pal::btnHover : Pal::btnIdle);
@@ -3733,6 +3739,11 @@ void SatelliteSim::applyGraphicsPreset(GraphicsPreset p)
     static constexpr uint32_t kBitTerrain = 1u, kBitOceanRefl = 8u, kBitAirglowRed = 16u,
                               kBitAurora = 32u, kBitBeams = 128u, kBitCloudShadow = 256u,
                               kBitBeamBlock = 512u, kBitFog = 2048u;
+    // Potato-only knockout bits (see CLAUDE.md "GPU Performance Profiling" bit table). Each has a
+    // documented math-safe fallback, same as the ones above.
+    static constexpr uint32_t kBitSceneDepth = 1024u, kBitBeamRayLoop = 8192u,
+                              kBitCirrusMarch = 16384u, kBitCloudMarch = 32768u,
+                              kBitSkyGlowLoop = 65536u, kBitMinimalSky = 262144u;
 
     struct PresetValues
     {
@@ -3747,6 +3758,25 @@ void SatelliteSim::applyGraphicsPreset(GraphicsPreset p)
 
     switch (p)
     {
+    case GraphicsPreset::Potato:
+        // Below Planetarium, for machines that can't sustain the fullscreen raymarch at all
+        // (2015-era / integrated GPUs, MoltenVK translation). Everything Planetarium turns off,
+        // PLUS: the half-res scene-depth pass (bit 1024 — Earth is flat here anyway, nothing
+        // consumes real terrain depth), the per-pixel beam pointing-ray loop (8192), and the two
+        // volumetric-march compute kernels + the 64-bin sky-glow loop (16384/32768/65536 — all
+        // no-ops at cloudCoverage 0). Atmosphere scattering (bit 2) is deliberately LEFT ON —
+        // measured on a MoltenVK/GCN1 target it cost only a few ms while its absence removed the
+        // entire sky gradient. viewSamples at the floor so the atmosphere it keeps is cheap.
+        //
+        // renderScale 1.0, NOT 0.5: on MoltenVK the < 1.0 path adds a whole extra offscreen render
+        // pass + a vkCmdBlitImage into the swapchain every frame, and each is another command-
+        // encoder boundary — on this driver that costs more than the pixels it saves (which the
+        // knockout sweep already proved don't matter here). Matches CLAUDE.md's "prefer 100%".
+        v = {kBitTerrain | kBitOceanRefl | kBitAirglowRed | kBitAurora | kBitBeams | kBitCloudShadow |
+                 kBitBeamBlock | kBitFog | kBitSceneDepth | kBitBeamRayLoop |
+                 kBitCirrusMarch | kBitCloudMarch | kBitSkyGlowLoop | kBitMinimalSky,
+             1.0f, 0.0f, 64.0f, 2.0f, 6.0f, 20.0f, 2.0f, 3.0f, 5.0f, 3.0f, 50000.0f, 100000.0f, 5000.0f, 10000.0f};
+        break;
     case GraphicsPreset::Planetarium:
         // v1.0 experience: flat textured Earth (cloudCoverage 0 — no cloud layer at all), terrain
         // relief and ocean reflection off (the sea-level sphere / flat ocean fallbacks already
@@ -3817,6 +3847,10 @@ void SatelliteSim::applyGraphicsPreset(GraphicsPreset p)
     cloudDistFadeStartM = v.cloudFadeStartM;
     cloudDistFadeEndM = v.cloudFadeEndM;
     graphicsPreset = p;
+
+    if (std::getenv("SATLIGHTSIM_FRAME_TRACE"))
+        fprintf(stderr, "[sky] applyGraphicsPreset(%s): mask=%u renderScale=%.3f ctx_=%p\n",
+                kGraphicsPresetNames[(int)p], debugDisableMask, renderScale, (void *)ctx_);
 
     if (ctx_)
     {
@@ -3910,7 +3944,9 @@ void SatelliteSim::loadSettings()
             // above; this is a different case (file exists, schema matches, preset just never
             // existed as a concept yet).
             int presetVal = d.value("graphics_preset", (int)GraphicsPreset::Custom);
-            graphicsPreset = (presetVal >= 0 && presetVal <= 5) ? (GraphicsPreset)presetVal : GraphicsPreset::Custom;
+            graphicsPreset = (presetVal >= 0 && presetVal <= (int)GraphicsPreset::Potato)
+                                 ? (GraphicsPreset)presetVal
+                                 : GraphicsPreset::Custom;
             showAdvancedSettings = d.value("show_advanced_settings", showAdvancedSettings);
             debugDisableMask = (uint32_t)d.value("debug_disable_mask", (int64_t)debugDisableMask);
         }
