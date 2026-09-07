@@ -1179,7 +1179,11 @@ cloud occlusion (`sat_point.frag` — added 2026-08-09 to isolate a reported per
 8192=Reflect-Orbital beam POINTING-RAY loop (`cloud_march.comp`'s per-pixel loop in `main()`),
 16384=`cirrusMarchCS`, 32768=`cloudMarchCS` (the volumetric low/mid march itself),
 65536=`sat_sky.frag`'s 64-bin satellite sky-glow loop, 131072=**beam tile cull OFF** (not a feature
-knockout — an optimization A/B; see "Beam pointing-ray tile culling" below).
+knockout — an optimization A/B; see "Beam pointing-ray tile culling" below),
+262144=**Potato sky** (swap `skyBgPipeline` → `skyBgMinimalPipeline`), 524288=**SKY_LITE sky**
+(swap → `skyBgLitePipeline`) — see "Subsystem: Weak-Hardware Sky Tiers". These last two are
+pipeline swaps, not in-shader branches; they're set by the Potato / Planetarium presets and are
+NOT part of the `kDebugToggles` sweep.
 
 **Bits 8192-65536 were added 2026-08-10** for the Anchorage worst-case profiling session, and all
 four cover blocks that previously had NO knockout, so their cost was permanently invisible inside a
@@ -1316,6 +1320,55 @@ are fixed at half the SWAP extent and do not scale, so at 1920x1009 dropping to 
 (beam occlusion gone, layers clamped at march time), 100% and 50% measure comparably in practice —
 and 100% additionally gets exact hardware-depth occlusion for satellites/stars. Prefer 100%. If
 render scale needs to matter again, the fix is making those two compute passes scale with it.
+
+---
+
+## Subsystem: Weak-Hardware Sky Tiers (Potato / SKY_LITE)
+
+`sat_sky.frag` is ~2900 lines. On a **2015 MacBook Pro (AMD Radeon R9 M370X / GCN 1.0, macOS 12,
+MoltenVK)** it compiles to one Metal fragment function whose register pressure collapses wavefront
+occupancy — measured **~490 ms/frame, the entire frame**. This is not tunable by any quality slider
+or `debugDisableMask` bit: those skip *execution*, not compiled *size*, and the constraint is peak
+VGPR count + total texture-fetch latency that must be hidden, not instruction count. See
+`SKY_OPTIMIZATION_PLAN.md` for the full investigation and `.gputrace` capture workflow
+(`tools/make_capture_bundle.sh` — needs full Xcode to read).
+
+Two stand-in fragment shaders, both bound through **`skyBgPipeLayout` / `skyDescSet` unchanged**
+(each declares only the bindings it reads) and selected in `recordDraw()` Pass 1 by
+`debugDisableMask` bit:
+
+| Tier | Bit | Pipeline | Shader | Notes |
+|---|---|---|---|---|
+| **Potato** | `262144` | `skyBgMinimalPipeline` | `shaders/sat_sky_minimal.frag` (own file, ~370 lines) | closed-form analytic atmosphere (Kasten-Young airmass, one 32-tap arithmetic loop — no raymarch), day/night + city-detail textures, one flat drifting cloud shell w/ terminator lighting, cheap ocean (1 noise-tap slope + Fresnel + Blinn glint), textured moon, verbatim `lensFlare()`. **~60 FPS.** No Milky Way / volumetric clouds / aurora / airglow / real ocean waves — those don't fit the GCN1 occupancy ceiling (~31–32 KB SPV; the Milky Way's `atan2`/`asin` + panorama fetch is the specific thing that broke it). |
+| **SKY_LITE** | `524288` | `skyBgLitePipeline` | `sat_sky.frag` **recompiled with `-DSKY_LITE`** → `sat_sky_lite.frag.spv` (2nd `add_custom_command` in CMakeLists) | `#ifdef SKY_LITE` cuts inside the real shader: Milky Way block, 64-bin satellite sky-glow loop, cloud layer loop `3→0` becomes `1→0`, the 3×3 `cloudTargetA/B` rgb blur → single tap, aurora surface glow (`auroraGlowAt` on terrain+ocean), zenith-ambient `N_ZT` 4→2, and the per-atmosphere-step **green/sodium airglow** (two `warpPerlin3` masks/step — the dominant cost) — city-glow upwelling KEPT but only on the first 3 march steps. **2 FPS → ~55 FPS** on the target. |
+
+262144 wins if both bits are set. The always-on `Log::line` breadcrumb in `recordDraw` reports
+`MINIMAL` / `LITE (SKY_LITE)` / `FULL sat_sky.frag` on any change (into `satlight_log.txt`) — this
+is also the instrument for `potato-mode-intermittent-slow-start` (see memory).
+
+**Preset wiring** (`applyGraphicsPreset`, `SatelliteSimUI.cpp`): **Potato** sets `kBitMinimalSky`
+plus every compute-side knockout; **Planetarium** sets `kBitLiteSky` + `kBitCloudMarch |
+kBitCirrusMarch` (coverage 0 at that tier) + `viewSamplesMin/Max 4/10`. Medium and up keep the full
+shader unchanged. `GraphicsPreset::Potato` is enum value 6 (appended after `Custom` to preserve
+persisted int indices); `kGraphicsPresetNames` and the preset-row UI list it first.
+
+`skyLowResPipeline` (renderScale < 1.0 prepass) is **not** given a lite/minimal variant — both
+those presets force `renderScale = 1.0`, so the prepass never runs for them.
+
+### All-platform changes that came out of this pass (land on `main`, not tier-gated)
+
+- **Sun corona bridge** (`sat_sky.frag` "Sun disc + atmospheric corona"): three stacked
+  `pow(cosA, 1800/320/55)` lobes peaking at ~disc brightness, added between the hard disc and the
+  `×0.12` wide `corona` Gaussian. Without it the disc dropped straight to the dim corona at its
+  edge — a hard brightness step that read post-tonemap as a dark ring / "cutout." Same shape as
+  `sat_sky_minimal.frag`'s Potato corona so the tiers match.
+- **Moon `squish` dead code removed**: the disabled (`squish = 0`) atmospheric-refraction block
+  still ran an `asin` + (below 15° elevation) two `tan` + `radians` to feed the identity
+  `dir.z * (1.0 + 0.0)`. Gone; ray/disc intersection uses `dir` directly.
+- **Cloud-shadow blur 5×5 → 3×3** (`kShadowBlurSpread = 1.7` keeps the ~radius-2 footprint;
+  centre tap reuses the already-sampled `cloudBCenter.a`): −17 texture samples on every ground-hit
+  pixel, the largest sample-count cut in the file. If ocean graininess returns, strengthen
+  `cloudGroundShadow`'s dither in `cloud_march.comp` rather than widening this back out.
 
 ---
 

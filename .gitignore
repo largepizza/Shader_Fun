@@ -31,6 +31,9 @@ Thumbs.db
 .claude
 .plans
 
+# ── GPU capture / benchmark scratch (kept in-repo, never committed) ───────────
+benchmarks/
+
 # ── Python tooling (tools/perf_analysis, etc.) ─────────────────────────────────
 .venv/
 __pycache__/

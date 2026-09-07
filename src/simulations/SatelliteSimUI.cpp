@@ -3743,7 +3743,8 @@ void SatelliteSim::applyGraphicsPreset(GraphicsPreset p)
     // documented math-safe fallback, same as the ones above.
     static constexpr uint32_t kBitSceneDepth = 1024u, kBitBeamRayLoop = 8192u,
                               kBitCirrusMarch = 16384u, kBitCloudMarch = 32768u,
-                              kBitSkyGlowLoop = 65536u, kBitMinimalSky = 262144u;
+                              kBitSkyGlowLoop = 65536u, kBitMinimalSky = 262144u,
+                              kBitLiteSky = 524288u; // sat_sky.frag -DSKY_LITE variant (Planetarium)
 
     struct PresetValues
     {
@@ -3786,8 +3787,17 @@ void SatelliteSim::applyGraphicsPreset(GraphicsPreset p)
         // flat-ocean fallback still uses, and are cheap enough to never scale down (user directive
         // 2026-08-04: "never compromise on ocean quality"); reflSamples is the one ocean slider
         // still turned down here since kBitOceanRefl makes it a true no-op at this tier.
-        v = {kBitTerrain | kBitOceanRefl | kBitAirglowRed | kBitAurora | kBitBeams | kBitCloudShadow | kBitBeamBlock | kBitFog,
-             1.0f, 0.0f, 64.0f, 2.0f, 6.0f, 48.0f, 2.0f, 3.0f, 5.0f, 3.0f, 50000.0f, 100000.0f, 5000.0f, 10000.0f};
+        // kBitLiteSky (SKY_OPTIMIZATION_PLAN.md Phase 1): sat_sky.frag compiled with -DSKY_LITE —
+        // Milky Way / 64-bin sky-glow loop / cirrus+high cloud layers / the 3x3 cloud rgb blur /
+        // aurora surface glow / per-atmosphere-step city-upwelling + airglow #ifdef'd out, for weak
+        // GPUs (2015 AMD via MoltenVK) where the full shader collapses fragment occupancy (measured
+        // 2 -> 22 FPS on the 2015 target). The full shader stays the default for Medium+ and any GPU
+        // that can run it. Phase 2: atmosphere march viewSamplesMin/Max 6/48 -> 4/10, and the two
+        // volumetric-cloud compute kernels knocked out (kBitCloudMarch/kBitCirrusMarch — coverage
+        // is 0 at this tier so they march nothing but still cost a dispatch + the sample below).
+        v = {kBitTerrain | kBitOceanRefl | kBitAirglowRed | kBitAurora | kBitBeams | kBitCloudShadow |
+                 kBitBeamBlock | kBitFog | kBitLiteSky | kBitCloudMarch | kBitCirrusMarch,
+             1.0f, 0.0f, 64.0f, 2.0f, 4.0f, 10.0f, 2.0f, 3.0f, 5.0f, 3.0f, 50000.0f, 100000.0f, 5000.0f, 10000.0f};
         break;
     case GraphicsPreset::Low:
         // Terrain stays on (a bare sea-level sphere with no relief reads as more "wrong" than

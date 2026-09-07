@@ -173,6 +173,20 @@ foreach(SHADER ${SHADERS})
     list(APPEND SPV_FILES ${SPV})
 endforeach()
 
+# Second compile of sat_sky.frag with -DSKY_LITE — a Planetarium-tier variant that #ifdef's out
+# the heaviest subsystems (Milky Way, 64-bin sky-glow loop, beam ground-spot, cirrus/high cloud
+# layers) for GPUs where the full shader collapses fragment-shader occupancy. Selected at runtime
+# by a debugDisableMask bit, exactly like sat_sky_minimal.frag. See SKY_OPTIMIZATION_PLAN.md.
+set(SKY_LITE_SPV "${SHADER_OUT_DIR}/sat_sky_lite.frag.spv")
+add_custom_command(
+    OUTPUT ${SKY_LITE_SPV}
+    COMMAND ${GLSLC} -I "${SHADER_INC_DIR}" -DSKY_LITE "${SHADER_SRC_DIR}/sat_sky.frag" -o ${SKY_LITE_SPV}
+    DEPENDS "${SHADER_SRC_DIR}/sat_sky.frag" ${SHADER_HEADERS}
+    COMMENT "Compiling shader: sat_sky.frag (SKY_LITE variant)"
+    VERBATIM
+)
+list(APPEND SPV_FILES ${SKY_LITE_SPV})
+
 add_custom_target(CompileShaders ALL DEPENDS ${SPV_FILES})
 add_dependencies(SatLightSim CompileShaders)
 

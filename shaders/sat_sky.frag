@@ -1527,6 +1527,14 @@ void main() {
     // neighbors.
     vec3  cloudARgb = vec3(0.0);
     vec3  cloudBRgb = vec3(0.0);
+#ifdef SKY_LITE
+    // The 3x3 rgb blur below exists only to de-jag a beam's glow riding inside cloudA.rgb where a
+    // cloud silhouette crosses it — and SKY_LITE cuts beams. Single tap: −16 texture samples on
+    // every pixel (this blur is not terrain-gated, so it was the largest unconditional sample cost
+    // left at the Planetarium tier). SKY_OPTIMIZATION_PLAN.md Phase 1.
+    cloudARgb = cloudACenter.rgb;
+    cloudBRgb = cloudBCenter.rgb;
+#else
     {
         vec2 cloudTexel = 1.0 / vec2(textureSize(cloudTargetA, 0));
         for (int sy = -1; sy <= 1; ++sy)
@@ -1538,6 +1546,7 @@ void main() {
         cloudARgb *= (1.0 / 9.0);
         cloudBRgb *= (1.0 / 9.0);
     }
+#endif
     vec4  cloudA         = vec4(cloudARgb, cloudACenter.a);
     vec4  cloudB         = vec4(cloudBRgb, cloudBCenter.a);
     float tCloudOcclude  = cloudA.a;
@@ -1648,6 +1657,26 @@ void main() {
         // near-surface atmosphere heavily, so an observer directly over a city gets strong
         // zenith glow while a distant observer only picks up dim glow from low horizon samples
         // — both fall out naturally from the same accumulation used for Rayleigh/Mie above.
+        //
+        // SKY_LITE (Planetarium-tier): the green/sodium airglow bands (two warpPerlin3-based
+        // coverage masks per step) are cut entirely — that was the bulk of the cost and this tier
+        // has no nightglow. City-glow upwelling is KEPT (the sim reads hollow at night without it)
+        // but only on the near steps: densR = exp(-h/8km) makes everything past ~3 steps a rounding
+        // error, so the per-step earthNightTex fetch + asin/atan is paid ~3× instead of ~10×.
+        // sampleSunDotGeo (the orbital terminator gate) needs every step, split out and cheapened:
+        // dot(normalize(sp), sunDir) is frame-invariant, skipping the ECEF matrix transform.
+#ifdef SKY_LITE
+        sampleSunDotGeo = dot(normalize(sp), sunDir);
+        if (i < 3) {
+            vec3  spDirECEF = normalize(sp.x * enuX + sp.y * enuY + sp.z * enuZ);
+            float spLat     = asin(clamp(spDirECEF.z, -1.0, 1.0));
+            float spLon     = atan(spDirECEF.y, spDirECEF.x);
+            vec2  spUV      = vec2((spLon + PI) / (2.0 * PI), (0.5 * PI - spLat) / PI);
+            float spLum     = dot(textureLod(earthNightTex, spUV, 4.0).rgb, vec3(0.2126, 0.7152, 0.0722));
+            vec3  attnCam   = exp(-(BETA_R * odR_cam + BETA_M * 1.1 * odM_cam));
+            accumCity += cityBrightness(spLum) * densR * dot(attnCam, vec3(1.0 / 3.0));
+        }
+#else
         {
             vec3  spECEF    = sp.x * enuX + sp.y * enuY + sp.z * enuZ;
             float spLen     = length(spECEF);
@@ -1688,6 +1717,7 @@ void main() {
                                 * airNight * airPatch;
             }
         }
+#endif
 
         // Shadow test: skip samples in Earth's shadow.
         // If the sun-ray from this point has TWO positive intersections with R_EARTH, the sun
@@ -1801,34 +1831,19 @@ void main() {
     if (moonDirENU.z > limbZ - kMoonAngR * 2.0) {
         vec3  moonDir3 = normalize(moonDirENU.xyz);
 
-        // ── Atmospheric refraction squish ─────────────────────────────────────
-        // Near the horizon, differential refraction lifts the bottom limb more
-        // than the top, compressing the apparent disc height.  The Bennett formula
-        // gives refraction R(el) in arcminutes; the squish fraction is the
-        // difference in R across the disc diameter, divided by the disc diameter.
-        float squish = 0.0;
-        float elDeg  = degrees(asin(clamp(moonDirENU.z, -1.0, 1.0)));
-        if (elDeg < 15.0) {
-            float r   = degrees(kMoonAngR);             // disc angular radius, degrees
-            float elo = max(elDeg - r, 0.2);            // lower limb elevation (clamped off ground)
-            float ehi = elDeg + r;                      // upper limb elevation
-            float Rlo = 1.02 / tan(radians(elo + 10.3 / (elo + 5.11))); // arcmin
-            float Rhi = 1.02 / tan(radians(ehi + 10.3 / (ehi + 5.11)));
-            squish = 0; //clamp((Rlo - Rhi) / (2.0 * r * 60.0), 0.0, 0.5);
-        }
-        // Stretching dir.z before intersection maps screen pixels into a
-        // vertically compressed disc-space — the silhouette becomes a physical
-        // ellipse (shorter in elevation) matching the naked-eye refraction effect.
-        vec3  dirR  = normalize(vec3(dir.xy, dir.z * (1.0 + squish)));
-
+        // (An atmospheric-refraction "squish" — compressing the disc vertically near the horizon
+        // via a Bennett-formula differential-refraction term — used to live here. It was disabled
+        // (`squish = 0`) but still ran two tan / a radians / an asin every moon-region pixel to
+        // compute a value that fed the identity `dir.z * (1.0 + 0.0)`. Removed, Phase 0 —
+        // SKY_OPTIMIZATION_PLAN.md. Re-add from git history if the effect is ever wanted back.)
         vec3  oc    = -moonDir3;
-        float bm    = dot(oc, dirR);
+        float bm    = dot(oc, dir);
         float cm    = 1.0 - kMoonAngR * kMoonAngR;
         float discm = bm * bm - cm;
         float tm    = -bm - sqrt(max(discm, 0.0));
         if (discm >= 0.0 && tm > 0.0) {
             moonDiscHit = true;
-            vec3  hp = tm * dirR;
+            vec3  hp = tm * dir;
             vec3  n  = normalize(hp - moonDir3);
             float diffuse  = max(0.0, dot(n, sunDir)) * moonDirENU.w;
             float mu       = max(0.0, dot(n, -moonDir3));
@@ -1884,6 +1899,7 @@ void main() {
     // slider behind it, so its share of the "sky background draw" bucket was previously
     // unmeasurable. Skipping just leaves `color` without the glow term, which is exactly what an
     // all-empty glowBuf already produces.
+#ifndef SKY_LITE   // Planetarium-tier variant: drop the 64-iteration satellite sky-glow loop
     if ((pc.debugDisableMask & 65536u) == 0u) {
         const float TWO_PI = 6.28318530718;
         vec3  flareAttn = exp(-(BETA_R * odR_cam + BETA_M * 1.1 * odM_cam));
@@ -1907,6 +1923,7 @@ void main() {
             color += hClip * gElev * glow * intens * 0.06 * vec3(1.0, 0.96, 0.88) * flareAttn * atmosW;
         }
     }
+#endif
 
     // ── Phase 3: ground / terrain composite ──────────────────────────────────
     // The atmosphere was truncated at tSurface, so odR_cam/odM_cam represent
@@ -1952,24 +1969,27 @@ void main() {
         // replacement has no range limit and nothing to snap, because the value is a function of
         // the world point being shaded rather than of where the camera happens to be.
         //
-        // 5x5 box-blurred over cloudTargetB's own half-res texels rather than a single tap.
+        // Box-blurred over cloudTargetB's own half-res texels rather than a single tap.
         // cloudGroundShadow (cloud_march.comp) is a 12-step raymarch dithered by one noise-texture
-        // lookup per half-res pixel, with no temporal accumulation to average it away (single
-        // frame in flight) — so the raw value reads as the noise texture itself stamped onto the
-        // ground, worst on the ocean where there's no other high-frequency detail to hide it in.
-        // A small spatial blur here is the same fix the light-pollution dome already uses (its own
-        // 5-tap blur) for the same kind of per-sector/per-texel sampling noise. Started at 3x3;
-        // still visibly grainy up close on the ocean, widened to 5x5 (radius 2 half-res texels,
-        // ~4 screen pixels at renderScale=1) — only ground-hit pixels pay for this, and 25 taps
-        // against an already-small half-res target is cheap next to the sky-ambient zenith
-        // integration and city-detail sampling this same branch already does.
-        float cloudShadowT = 0.0;
+        // lookup per half-res pixel, with no temporal accumulation to average it away (single frame
+        // in flight) — so the raw value reads as the noise texture itself stamped onto the ground,
+        // worst on the ocean where there's no other high-frequency detail to hide it in. A small
+        // spatial blur here is the same fix the light-pollution dome already uses.
+        //
+        // Phase 0 (SKY_OPTIMIZATION_PLAN.md): was a 5x5 (25 texture taps on every ground pixel — the
+        // single heaviest sample count in this shader on GCN1). Now a 3x3 at kShadowBlurSpread texel
+        // spacing so the FOOTPRINT still ~matches radius-2 (was 2.0, now 1.7) for 9 taps. If ocean
+        // graininess returns, strengthen cloudGroundShadow's dither in cloud_march.comp rather than
+        // widening this back out.
+        const float kShadowBlurSpread = 1.7;
+        float cloudShadowT = cloudBCenter.a;   // centre tap — already sampled above, don't re-fetch
         {
-            vec2 shadowTexel = 1.0 / vec2(textureSize(cloudTargetB, 0));
-            for (int sy = -2; sy <= 2; ++sy)
-                for (int sx = -2; sx <= 2; ++sx)
-                    cloudShadowT += texture(cloudTargetB, cloudUV + vec2(sx, sy) * shadowTexel).a;
-            cloudShadowT *= (1.0 / 25.0);
+            vec2 shadowTexel = kShadowBlurSpread / vec2(textureSize(cloudTargetB, 0));
+            for (int sy = -1; sy <= 1; ++sy)
+                for (int sx = -1; sx <= 1; ++sx)
+                    if ((sx | sy) != 0)
+                        cloudShadowT += texture(cloudTargetB, cloudUV + vec2(sx, sy) * shadowTexel).a;
+            cloudShadowT *= (1.0 / 9.0);
         }
         directSun *= cloudShadowT;
         // Antimeridian seam fix: longitude wraps at ±PI so dFdx(uvSurf.x) jumps by ~1.0
@@ -2135,7 +2155,11 @@ void main() {
             vec3  zenT = normalize(hitPt);  // terrain zenith (radially outward)
             vec2  tSAT = raySphere(hitPt, zenT, R_ATMOS);
             if (tSAT.y > 0.0) {
+#ifdef SKY_LITE
+                const int N_ZT = 2;   // Planetarium-tier: halve the optDepth zenith integration
+#else
                 const int N_ZT = 4;
+#endif
                 float zSegT    = tSAT.y / float(N_ZT);
                 float cosAT    = dot(zenT, sunDir);
                 float pR_upT   = 0.75 * (1.0 + cosAT * cosAT);
@@ -2190,6 +2214,9 @@ void main() {
         // already correct) but wrong for auroraGlowAt specifically — it made the computed
         // "geographic" position track the OBSERVER's own frame instead of the terrain point's true
         // location, so the noise pattern appeared to follow the observer instead of the ground.
+#ifdef SKY_LITE
+        vec3  auroraContribTerrain = vec3(0.0);   // Planetarium-tier: aurora surface glow cut (auroraGlowAt's fold-noise fetch + oval mask)
+#else
         vec3  hitDirECEF           = normalize(hitPt.x * enuX + hitPt.y * enuY + hitPt.z * enuZ);
         vec3  auroraGlowTerrain    = auroraGlowAt(hitDirECEF, sunDirECEF, pc.waveTime, cloud.stormStrength);
         // Same cloud-awareness gap as the ocean reflection fix (see that block's comment) — this
@@ -2200,6 +2227,7 @@ void main() {
         vec3  auroraContribTerrain = dayColor * auroraGlowTerrain
                                     * max(dot(shadingN, normalize(hitPt)), 0.0)
                                     * cloud.auroraGroundGain * auroraGroundCloudOccl;
+#endif
 
         // cloudShadowT gates only the direct-sun term (real cloud shadows block the sun, not the
         // diffuse skylight) — skyAmbientTerrain stays outside it, same split the ocean branch
@@ -2435,12 +2463,14 @@ void main() {
             // surfUp is the observer-local "up" (same frame as hitPt/obsPos/dir) — auroraGlowAt
             // needs a TRUE ECEF direction instead (see the terrain block's own comment on this same
             // bug), so it goes through enuX/enuY/enuZ first rather than being passed straight in.
+#ifndef SKY_LITE   // Planetarium-tier: aurora glow on the ocean surface cut (matches the terrain-hit cut above)
             vec3 surfUpECEF = normalize(surfUp.x * enuX + surfUp.y * enuY + surfUp.z * enuZ);
             // Same cloud gate as the terrain ground-glow and the aurora reflection above — this
             // is why the water kept turning aurora-green straight through an overcast sky.
             float auroraGroundCloudOcclOcean = dot(cloudB.rgb, vec3(1.0 / 3.0));
             surfColor += auroraGlowAt(surfUpECEF, sunDirECEF, pc.waveTime, cloud.stormStrength)
                        * cloud.auroraGroundGain * 0.5 * atten * auroraGroundCloudOcclOcean;
+#endif
             // Mirror satellite flare glints — own small independent capped atomic-append list
             // (flare architecture overhaul), decoupled from the deleted per-pixel corona system.
             // Now also occlusion-aware (previously had NONE at all): sampled at each entry's own
@@ -2477,6 +2507,8 @@ void main() {
         // dimmer in fully clear air — the shadow lookup below only accounts for intervening
         // cloud, not "is there scattering medium to see the beam in" (there's no beam here to
         // see, just a lit patch of ground).
+        // (Kept in SKY_LITE — the ground-spot loop is bounded by groundBeamCount and measured
+        // cheap; beams are a wanted feature and run fine at the Planetarium tier.)
         if ((pc.debugDisableMask & 128u) == 0u) {
             const float kBeamGroundScale = 4e-8;
             // Normalized against the slider's default (0.05, see SatelliteSim.h) so existing
@@ -2547,7 +2579,11 @@ void main() {
     // so the farthest-from-a-ground-observer shell must be drawn FIRST (as background) and the
     // nearest drawn LAST (on top) for correct back-to-front compositing — ascending-index order
     // had this backwards (cirrus drew over the low deck regardless of which was actually nearer).
+#ifdef SKY_LITE
+    for (int li = 1; li >= 0; --li) {   // Planetarium-tier: low/mid deck only, drop cirrus + high layers
+#else
     for (int li = 3; li >= 0; --li) {
+#endif
         if (cloud.layers[li].enabled < 0.5) continue;
         // The 3D->2D weight used to be computed here from observer altitude alone — one value for
         // the entire screen. It now lives inside evalCloudLayer, which knows this ray's own
@@ -2627,6 +2663,11 @@ void main() {
     // updateStars(): sun-elevation/space detection, moonlight, directional light-pollution dome,
     // and atmospheric extinction. Added post-tonemap like the ambient terms around it (comparably
     // faint) rather than folded into the HDR atmosphere accumulation above.
+    //
+    // SKY_LITE (Planetarium-tier): cut entirely — the equirect projection's atan2/asin plus the
+    // panorama texture fetch are disproportionately expensive on weak GPUs (this is the exact term
+    // that sank the Potato experiment). The discrete star catalogue still renders.
+#ifndef SKY_LITE
     {
         // Space detection: mirrors CPU's updateStars()/atmFrac — linear fade over the last
         // stretch of the simulated atmosphere shell (40-100km, R_ATMOS-R_EARTH=100km) rather
@@ -2734,6 +2775,7 @@ void main() {
                           * pow(clamp(cloudBlock, 0.0, 1.0), kMWCloudSuppressPower);
         color += mwColor * visibility;
     }
+#endif
 
     // ── Moonlight ambient ──────────────────────────────────────────────────────
     float moonEl    = clamp(moonDirENU.z, 0.0, 1.0);
@@ -2780,10 +2822,20 @@ void main() {
         vec3  sunCol     = mix(vec3(1.5, 1.3, 1.0), vec3(1.8, 0.7, 0.2), sunsetT * 0.7);
         float coronaSig  = mix(0.035, 0.08, sunsetT * sunsetT);
         float corona     = exp(-angle * angle / (2.0 * coronaSig * coronaSig)) * sunGate;
+        // Bright inner glare bridging the disc edge to the *0.12 wide corona. Without it the disc
+        // (full `sunCol`) dropped straight to the dim corona at its edge — a hard brightness step
+        // that reads, especially post-tonemap, as a dark ring / "cutout" around the sun. Three
+        // stacked pow lobes peaking at ~disc brightness (sum ≈ 1.0), same shape as
+        // sat_sky_minimal.frag's Potato corona so the two tiers match. `g = max(cosA,0)`;
+        // pow(g,N) ≈ exp(-N·angle²/2), so N = 1800/320/55 → σ ≈ 0.024/0.056/0.135 rad.
+        float g          = max(cosA, 0.0);
+        float glare      = (pow(g, 1800.0) * 0.85 + pow(g, 320.0) * 0.13 + pow(g, 55.0) * 0.03) * sunGate;
         // Remaining soft dimming (cloudBlock, A_total's luminance) still applies on top for thin/
         // translucent cloud the hard gate above doesn't trip on — a hazy, dimmed disc through mist
         // is correct; sunGate only handles the "actually opaque" case that dimming alone can't.
-        color += (discVis * geomFade * sunCol + corona * geomFade * sunCol * 0.12) * cloudBlock;
+        color += (discVis * geomFade * sunCol
+                  + glare  * geomFade * sunCol
+                  + corona * geomFade * sunCol * 0.12) * cloudBlock;
     }
 
     // ── Camera lens flares (post-tonemap) ─────────────────────────────────────

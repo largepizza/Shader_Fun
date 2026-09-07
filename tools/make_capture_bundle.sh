@@ -1,14 +1,17 @@
 #!/bin/bash
 # Wraps the built executable in a minimal .app bundle that declares MetalCaptureEnabled,
 # so `MTL_CAPTURE_ENABLED=1` + MoltenVK's auto-capture (or Xcode) can grab a GPU frame.
+# Opening the resulting .gputrace and reading shader occupancy stats needs FULL Xcode
+# (Command Line Tools alone cannot). Traces are large (~GBs) — keep them in benchmarks/
+# (gitignored), never the home or root dir.
 #
-# Run from the project root AFTER building. Then, from build/ (so assets resolve):
-#   cd build
+# Run from the project root AFTER building, then:
+#   mkdir -p benchmarks && cd build
 #   MTL_CAPTURE_ENABLED=1 \
 #   MVK_CONFIG_AUTO_GPU_CAPTURE_SCOPE=2 \
-#   MVK_CONFIG_AUTO_GPU_CAPTURE_OUTPUT_FILE=$HOME/satlight.gputrace \
+#   MVK_CONFIG_AUTO_GPU_CAPTURE_OUTPUT_FILE=../benchmarks/sky.gputrace \
 #   ./SatLightSimCapture.app/Contents/MacOS/satlightsim
-# then open ~/satlight.gputrace in Xcode.
+#   # (delete ../benchmarks/sky.gputrace before re-running — it won't overwrite)
 set -e
 
 EXE=$(ls build/SAT_LIGHT_SIM_V_* 2>/dev/null | head -1)

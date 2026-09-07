@@ -1501,6 +1501,11 @@ private:
     // pipeline layout / descriptor set / render pass as skyBgPipeline — only the fragment module
     // differs (shaders/sat_sky_minimal.frag). Created and resized alongside skyBgPipeline.
     VkPipeline skyBgMinimalPipeline = VK_NULL_HANDLE;
+    // Planetarium-tier stand-in used when debugDisableMask bit 524288 is set: sat_sky.frag compiled
+    // a second time with -DSKY_LITE (shaders/sat_sky_lite.frag.spv) — heaviest subsystems #ifdef'd
+    // out for GPUs where the full shader collapses occupancy but the minimal shader is too austere.
+    // Same layout / descriptor set / render pass; created and resized alongside skyBgPipeline.
+    VkPipeline skyBgLitePipeline = VK_NULL_HANDLE;
     VkPipelineLayout drawPipeLayout = VK_NULL_HANDLE;
     VkPipeline drawPipeline = VK_NULL_HANDLE;
 

@@ -389,7 +389,9 @@ void SatelliteSim::onResize(VulkanContext &ctx)
     skyBgPipeline = VK_NULL_HANDLE;
     vkDestroyPipeline(ctx.device, skyBgMinimalPipeline, nullptr);
     skyBgMinimalPipeline = VK_NULL_HANDLE;
-    createSkyBgPipeline(ctx); // recreates both skyBgPipeline and skyBgMinimalPipeline
+    vkDestroyPipeline(ctx.device, skyBgLitePipeline, nullptr);
+    skyBgLitePipeline = VK_NULL_HANDLE;
+    createSkyBgPipeline(ctx); // recreates skyBgPipeline + skyBgMinimalPipeline + skyBgLitePipeline
 
     // Resolution scaling: low-res target is sized off ctx.swapExtent too, so it needs the same
     // destroy+recreate treatment as skyBgPipeline just above.
@@ -2898,7 +2900,11 @@ void SatelliteSim::recordDraw(VkCommandBuffer cmd, VulkanContext &ctx, float /*d
             // Potato preset (bit 262144): swap in the minimal fragment shader. sat_sky.frag is
             // ~490 ms/frame on a 2015 AMD GPU via MoltenVK — the whole frame — and no quality
             // slider or knockout reduces it. Same layout / descriptor set / push constant.
-            VkPipeline skyPipe = (debugDisableMask & 262144u) ? skyBgMinimalPipeline : skyBgPipeline;
+            // Planetarium-tier (bit 524288): the -DSKY_LITE variant (heaviest subsystems cut).
+            // 262144 wins if both are somehow set.
+            VkPipeline skyPipe = (debugDisableMask & 262144u) ? skyBgMinimalPipeline
+                               : (debugDisableMask & 524288u) ? skyBgLitePipeline
+                                                              : skyBgPipeline;
             {
                 // Always-on breadcrumb (into satlight_log.txt) for the intermittent Potato
                 // slow-start bug — see [[potato-mode-intermittent-slow-start]]. Logs only on a
@@ -2908,7 +2914,9 @@ void SatelliteSim::recordDraw(VkCommandBuffer cmd, VulkanContext &ctx, float /*d
                 if (skyPipe != lastSkyPipe || debugDisableMask != lastSkyMask)
                 {
                     Log::line("sky pipeline: " +
-                              std::string((skyPipe == skyBgMinimalPipeline) ? "MINIMAL" : "FULL sat_sky.frag") +
+                              std::string((skyPipe == skyBgMinimalPipeline) ? "MINIMAL"
+                                          : (skyPipe == skyBgLitePipeline)   ? "LITE (SKY_LITE)"
+                                                                             : "FULL sat_sky.frag") +
                               " (mask " + std::to_string(debugDisableMask) +
                               ", renderScale " + std::to_string(renderScale) + ")");
                     lastSkyPipe = skyPipe;
@@ -3085,6 +3093,7 @@ void SatelliteSim::cleanup(VkDevice device)
     vkDestroyPipeline(device, compPipeline, nullptr);
     vkDestroyPipeline(device, skyBgPipeline, nullptr);
     vkDestroyPipeline(device, skyBgMinimalPipeline, nullptr);
+    vkDestroyPipeline(device, skyBgLitePipeline, nullptr);
     destroySkyLowResResources(device);
     vkDestroyPipeline(device, drawPipeline, nullptr);
     vkDestroyPipelineLayout(device, compPipeLayout, nullptr);
@@ -6344,6 +6353,16 @@ void SatelliteSim::createSkyBgPipeline(VulkanContext &ctx)
         if (vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &minCi, nullptr, &skyBgMinimalPipeline) != VK_SUCCESS)
             throw std::runtime_error("SatelliteSim: failed to create minimal sky background pipeline");
         vkDestroyShaderModule(ctx.device, minFrag, nullptr);
+
+        // Planetarium-tier variant — sat_sky.frag built with -DSKY_LITE (bit 524288).
+        VkShaderModule liteFrag = ctx.loadShader("shaders/sat_sky_lite.frag.spv");
+        VkPipelineShaderStageCreateInfo liteStages[2] = {stages[0], stages[1]};
+        liteStages[1].module = liteFrag;
+        VkGraphicsPipelineCreateInfo liteCi = ci;
+        liteCi.pStages = liteStages;
+        if (vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &liteCi, nullptr, &skyBgLitePipeline) != VK_SUCCESS)
+            throw std::runtime_error("SatelliteSim: failed to create lite sky background pipeline");
+        vkDestroyShaderModule(ctx.device, liteFrag, nullptr);
     }
 
     vkDestroyShaderModule(ctx.device, vert, nullptr);
