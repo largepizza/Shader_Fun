@@ -300,6 +300,15 @@ layout(set = 0, binding = CLOUD_PARAMS_BINDING) uniform CloudParams {
     // patchiness (see airglowCoverageGain above).
     float airglowCoverageGain;
     float airglowPolarGain;
-    float pad21;
-    float pad22;
+    // ── Zodiacal light (496 -> 512) ───────────────────────────────────────────────────────────
+    // pad21/pad22 repurposed: zodiacalWidthDeg (ecliptic-latitude Gaussian sigma near the sun),
+    // zodiacalOuterFadeDeg (elongation at which the cone has faded out). eclipticPoleENU.xyz is a
+    // CPU-computed (updatePositions(), mirrors the Milky Way's mwBasisRow0-2 idiom) ENU-frame unit
+    // vector toward the ecliptic north pole — NOT a full lon/lat basis like the Milky Way's, since
+    // zodiacal light is a pure analytic falloff (elongation from the sun + ecliptic latitude), not
+    // texture-sampled, so it only ever needs the latitude term: asin(dot(dir, eclipticPoleENU.xyz)).
+    // eclipticPoleENU.w = zodiacalGain, the master brightness multiplier.
+    float zodiacalWidthDeg;      // was pad21
+    float zodiacalOuterFadeDeg;  // was pad22
+    vec4 eclipticPoleENU;
 } cloud;

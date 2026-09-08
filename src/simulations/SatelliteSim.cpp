@@ -273,7 +273,7 @@ void SatelliteSim::init(VulkanContext &ctx)
         {"Speed Up", GLFW_KEY_PERIOD, GLFW_GAMEPAD_BUTTON_DPAD_RIGHT, false, false},        // KB_FASTER
         {"Reverse Time", GLFW_KEY_R, GLFW_GAMEPAD_BUTTON_DPAD_UP, false, false},            // KB_REVERSE
         {"Move Fast", GLFW_KEY_LEFT_SHIFT, GLFW_GAMEPAD_BUTTON_LEFT_THUMB, true, false},    // KB_MOVE_BOOST (held)
-        {"Move Fine", GLFW_KEY_LEFT_CONTROL, GLFW_GAMEPAD_BUTTON_RIGHT_THUMB, true, false}, // KB_MOVE_FINE  (held)
+        {"Move Fine", GLFW_KEY_LEFT_CONTROL, GLFW_GAMEPAD_BUTTON_RIGHT_THUMB, false, false}, // KB_MOVE_FINE  (event, toggle)
         {"Cinematic Pan", GLFW_KEY_LEFT_ALT, -1, false, false},                             // KB_CINEMATIC  (event, toggle)
         {"Raise Elevation", GLFW_KEY_Q, -1, true, false},                                   // KB_RAISE_ELEV (held) — gamepad is the analog right trigger, see gpElevRaise
         {"Lower Elevation", GLFW_KEY_E, -1, true, false},                                   // KB_LOWER_ELEV (held) — gamepad is the analog left trigger, see gpElevLower
@@ -966,7 +966,7 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
     if ((!showIntro || introCaptionIndex >= kIntroControlsIndex) && win)
     {
         bool boost = (win && glfwGetKey(win, keybindings[KB_MOVE_BOOST].key) == GLFW_PRESS) || gpHeld(KB_MOVE_BOOST);
-        bool fine = (win && glfwGetKey(win, keybindings[KB_MOVE_FINE].key) == GLFW_PRESS) || gpHeld(KB_MOVE_FINE);
+        bool fine = fineMoveToggled; // latched by KB_MOVE_FINE (dispatchKeyAction), not held
         float speed = boost ? 0.5f : fine ? 0.005f
                                           : 0.08f; // boost = fast, fine = slow, default = normal
 
@@ -1079,7 +1079,23 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
         // observer's actual position, so this tracks a real eclipse/shadow crossing reasonably
         // well without a separate Earth-shadow ray test).
         bool sunlit = sunDirENU.w > 0.0f;
-        float glareTarget = sunOnScreen ? 0.0f : (sunlit ? sunlitBgVisibility : 1.0f);
+
+        // sunOnScreen above is a pure camera-frustum/projection test on sunDirENU — it has no
+        // notion of what actually lies along that line of sight, so it fired glare even when the
+        // sun's disc is fully hidden behind the Earth's own limb (e.g. on the night side, looking
+        // toward the direction the sun geometrically sits in but Earth's curvature blocks it).
+        // Gate it with the same spherical-horizon test the sun disc's own visibility already uses
+        // in sat_sky.frag (limbZ): the sun is below the geometric horizon — and therefore
+        // Earth-occluded — once its elevation sine (sunDirENU.w) drops below
+        // -sqrt(1-(R_EARTH/obsR)^2), which grows more negative with altitude, so a high-orbit
+        // observer correctly keeps "seeing" (and being glared by) the sun well past local sunset.
+        float obsRForLimb = glm::length(obsECI);
+        float limbZCpu = (obsRForLimb > kEarthRadius)
+                              ? -sqrtf(std::max(0.0f, 1.0f - (kEarthRadius / obsRForLimb) * (kEarthRadius / obsRForLimb)))
+                              : 0.0f;
+        bool sunOccludedByEarth = sunDirENU.w < limbZCpu;
+
+        float glareTarget = (sunOnScreen && !sunOccludedByEarth) ? 0.0f : (sunlit ? sunlitBgVisibility : 1.0f);
 
         // Asymmetric hysteresis: glare hits fast (sensor/eyes overwhelmed almost immediately),
         // recovery is slow (night-vision-style readaptation) — avoids an instant on/off pop
@@ -1813,6 +1829,9 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
         cp.airglowSodiumGain = airglowSodiumGain;
         cp.airglowCoverageGain = airglowCoverageGain;
         cp.airglowPolarGain = airglowPolarGain;
+        cp.zodiacalWidthDeg = zodiacalWidthDeg;
+        cp.zodiacalOuterFadeDeg = zodiacalOuterFadeDeg;
+        cp.eclipticPoleENU = glm::vec4(eclipticPoleENU, zodiacalGain); // .w = zodiacalGain
         cp.shadowMaxDistM = cloudShadowMaxDistM;
         cp.maxRenderDistM = cloudMaxRenderDistM;
         cp.viewSamplesMin = viewSamplesMin;
@@ -3790,6 +3809,9 @@ void SatelliteSim::dispatchKeyAction(int bindIdx)
     case KB_REVERSE:
         toggleTimeDirection();
         break;
+    case KB_MOVE_FINE:
+        fineMoveToggled = !fineMoveToggled;
+        break;
     case KB_CINEMATIC:
         // Mouse-drag-flavored feature (RMB capture is required to mean anything); gated
         // the same way regardless of whether the press came from a key or a gamepad button.
@@ -3855,7 +3877,7 @@ void SatelliteSim::dispatchKeyAction(int bindIdx)
             trailClearPending = true;
         break;
     default:
-        break; // KB_MOVE_BOOST/FINE, KB_RAISE_ELEV/LOWER_ELEV, KB_ZOOM_IN/OUT are held keys — polled directly.
+        break; // KB_MOVE_BOOST, KB_RAISE_ELEV/LOWER_ELEV, KB_ZOOM_IN/OUT are held keys — polled directly.
     }
 }
 
@@ -8776,6 +8798,17 @@ void SatelliteSim::updatePositions(double t, float dt)
         glm::dot(sunDirECI, north),
         glm::dot(sunDirECI, up)};
     sunDirENU = glm::vec4(glm::normalize(sunENU), sunENU.z); // w = sin(elevation)
+
+    // ── Ecliptic pole in ENU, for zodiacal light ──────────────────────────────
+    // Ecliptic north pole (0,0,1) rotated into this same equatorial ECI frame by the identical
+    // obliquity rotation the Moon calc below applies (X unchanged, Y/Z rotated by epsR about X) —
+    // with ecliptic Y=Z=0 that reduces to (0, -sin(epsR), cos(epsR)). Projected into ENU the same
+    // way the Milky Way basis above is, so the shader only needs one dot product for ecliptic
+    // latitude (asin(dot(dir, eclipticPoleENU))) — no full lon/lat basis needed, since zodiacal
+    // light is a pure analytic falloff, not texture-sampled.
+    glm::vec3 eclPoleECI{0.0f, -(float)sin(epsR), (float)cos(epsR)};
+    eclipticPoleENU = glm::normalize(glm::vec3(
+        glm::dot(eclPoleECI, east), glm::dot(eclPoleECI, north), glm::dot(eclPoleECI, up)));
 
     // ── Moon direction in ECI (Keplerian two-body ellipse — see kMoonElements) ───────────────
     // Was a circular equatorial orbit with a phase constant hand-calibrated for one epoch

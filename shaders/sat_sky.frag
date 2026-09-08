@@ -2702,8 +2702,13 @@ void main() {
         // mostly redundant with nightFactorEffSky already zeroing everything once the sun is up,
         // but it also correctly dims the Milky Way near the sun during twilight, when the rest of
         // the sky is still dark enough to show it.
+        // Gated on the sun actually being above the spherical horizon (same limbZ test the sun
+        // disc's own visibility uses below) — a pure angle-to-sunDir test has no notion of what's
+        // along that line of sight, so without this it kept dimming the Milky Way toward the
+        // sunset point (or, from orbit, toward wherever the Earth hides the sun) long after the
+        // sun itself was fully Earth-occluded and no real glare could exist.
         float sunAngleMW = acos(clamp(dot(dir, sunDir), -1.0, 1.0));
-        float sunGlareSuppress = smoothstep(0.12, 0.5, sunAngleMW); // 0 within ~7deg, 1 beyond ~29deg
+        float sunGlareSuppress = (sunDirENU.w > limbZ) ? smoothstep(0.12, 0.5, sunAngleMW) : 1.0; // 0 within ~7deg, 1 beyond ~29deg or sun occluded
 
         // Project the view ray into the galactic frame and sample the panorama.
         vec3 dirGal = vec3(dot(dir, cloud.mwBasisRow0.xyz),
@@ -2733,6 +2738,107 @@ void main() {
                           * (moonDiscHit ? 0.0 : 1.0)    // blocked by the Moon's own opaque disc
                           * pow(clamp(cloudBlock, 0.0, 1.0), kMWCloudSuppressPower);
         color += mwColor * visibility;
+    }
+
+    // ── Zodiacal light ─────────────────────────────────────────────────────────
+    // Sunlight scattered by interplanetary dust in the ecliptic plane — a faint, warm-white
+    // diffuse cone brightest a few degrees beyond the sun's own corona, fading with elongation,
+    // plus a much fainter "gegenschein" patch directly opposite the sun. Pure analytic falloff,
+    // no texture: elongation from the sun needs only sunDir (already in scope); ecliptic latitude
+    // needs the one new CPU-computed basis vector, cloud.eclipticPoleENU (see updatePositions()
+    // and cloud_params.glsl). Added post-tonemap for the same reason the Milky Way/sun disc/moon
+    // corona are — a faint additive term should read at a consistent brightness regardless of
+    // whatever exposure the raw HDR atmosphere integral needed that frame, not get compressed or
+    // blown out differently by EXPOSURE_DAY/EXPOSURE_NIGHT depending on sky brightness that frame.
+    // Deliberately does NOT reuse the Milky Way's sunGlareSuppress above — that exists specifically
+    // to dim things NEAR the sun, which is exactly where zodiacal light is brightest; innerFade
+    // below handles the seam against the corona for an unrelated reason (avoiding a double-bright
+    // ring, not glare). Locals below duplicate the Milky Way block's day/night/moon/extinction/
+    // dome shapes rather than reaching across the closed `{}` above — same per-block-local
+    // convention this file already uses everywhere else.
+    {
+        float theta = acos(clamp(dot(dir, sunDir), -1.0, 1.0));
+        float beta  = asin(clamp(dot(dir, cloud.eclipticPoleENU.xyz), -1.0, 1.0));
+
+        // Main cone: innerFade clears the sun corona's own falloff (coronaSig maxes at ~0.08 rad
+        // above), outerFade closes it out by cloud.zodiacalOuterFadeDeg. The ecliptic-latitude
+        // sigma narrows with elongation — wide and low near the sun/horizon, narrowing further
+        // out — the real cone shape.
+        float innerFade = smoothstep(0.09, 0.17, theta);
+        float outerR1   = radians(cloud.zodiacalOuterFadeDeg);
+        float outerR0   = outerR1 * 0.75;
+        float outerFade = 1.0 - smoothstep(outerR0, outerR1, theta);
+        float sigmaNear = radians(cloud.zodiacalWidthDeg);
+        float sigmaFar  = sigmaNear * 0.45;
+        float sigmaLat  = mix(sigmaNear, sigmaFar, smoothstep(0.0, 1.2, theta));
+        float latFalloff = exp(-(beta * beta) / (2.0 * sigmaLat * sigmaLat));
+        float zodMain = innerFade * outerFade * latFalloff;
+
+        // Gegenschein: same shape mirrored around the antisolar direction, tight and dim, no
+        // separate slider — real zodiacal light's opposition brightening is subtle.
+        float thetaAnti = acos(clamp(dot(dir, -sunDir), -1.0, 1.0));
+        float outerFadeAnti  = 1.0 - smoothstep(radians(15.0), radians(25.0), thetaAnti);
+        float sigmaAnti       = sigmaNear * 0.6;
+        float latFalloffAnti  = exp(-(beta * beta) / (2.0 * sigmaAnti * sigmaAnti));
+        const float kZodGegenscheinRatio = 0.07;
+        float gegenschein = outerFadeAnti * latFalloffAnti * kZodGegenscheinRatio;
+        float zodShape = zodMain + gegenschein;
+
+        // Color: pale warm-white, far less saturated than the sun disc/corona (vec3(1.8,0.7,0.2)
+        // above) — a faint wash, not a second sun. Mirrors the sun disc's own sunsetT shape for a
+        // consistent warm shift near the horizon; the gegenschein (night-side) stays unwarmed.
+        float sunsetTZod = clamp(1.0 - (sunDirENU.w - limbZ) / 0.15, 0.0, 1.0);
+        vec3  zodColMain = mix(vec3(1.00, 0.98, 0.92), vec3(1.05, 0.88, 0.68), sunsetTZod * 0.5);
+        vec3  zodColAnti = vec3(1.0, 0.98, 0.95);
+        vec3  zodCol = (zodMain * zodColMain + gegenschein * zodColAnti) / max(zodShape, 1e-4);
+
+        // Visibility chain — same day/night, moonlight, terrain/cloud/moon-disc occlusion shape
+        // the Milky Way uses above, minus sunGlareSuppress (see header comment). Pollution reuses
+        // the shared per-pixel dome (S2c isotropic-floor shape from sat_flare.comp/updateStars),
+        // not the Milky Way's own decoupled mwSuppressEased hysteresis state — real zodiacal light
+        // tolerates more light pollution than the Milky Way, so it gets a gentler max-dim ceiling
+        // instead of its own eased CPU state.
+        float atmFracSkyZ    = 1.0 - clamp((obsEffH - 40000.0) / (100000.0 - 40000.0), 0.0, 1.0);
+        float nightFactorSkyZ = clamp(-sunDirENU.w * 5.0, 0.0, 1.0);
+        float nightFactorEffZ = mix(pc.skyGlareVisibility, nightFactorSkyZ, atmFracSkyZ);
+
+        float tmZ = clamp(moonDirENU.z / 0.5, 0.0, 1.0);
+        float moonBrightZ = tmZ * tmZ * moonDirENU.w;
+        const float kZodMoonMaxDim = 0.9;
+
+        // Ray's own tangent-altitude extinction (not the observer-altitude atmFracSkyZ above) —
+        // same rayTangentAltM correction documented for aurora/satellites/stars/planets/Milky Way.
+        float atmFracExtinctZ = 1.0 - clamp((rayTangentAltM(obsPos, dir) - 40000.0) / (100000.0 - 40000.0), 0.0, 1.0);
+        float sinElZ    = clamp(dir.z, 0.0, 1.0);
+        float elDegZ    = degrees(asin(sinElZ));
+        float airmassZ  = 1.0 / (sinElZ + 0.50572 * pow(elDegZ + 6.07995, -1.6364));
+        float extinctMagZ = cloud.extinctionCoeff * (airmassZ - 1.0) * atmFracExtinctZ;
+        float extinctionZ = pow(10.0, -0.4 * extinctMagZ);
+
+        // Directional light-pollution dome — same azimuth-sector lookup + isotropic-floor blend
+        // as sat_flare.comp/updateStars(), duplicated locally (own view direction, own constant).
+        float azZ      = mod(atan(dir.x, dir.y) + 6.283185307, 6.283185307);
+        float secFZ    = azZ * (16.0 / 6.283185307) - 0.5;
+        int   sec0Z    = int(floor(secFZ));
+        float secFracZ = secFZ - float(sec0Z);
+        int   sec0wZ   = ((sec0Z % 16) + 16) % 16;
+        int   sec1wZ   = (sec0wZ + 1) % 16;
+        float elevFalloffZ = 0.35 / (max(dir.z, 0.0) + 0.35);
+        float domeAzZ  = mix(lightDome[sec0wZ], lightDome[sec1wZ], secFracZ);
+        const float kZodIsotropicFrac = 0.4;
+        float domeValZ = clamp(domeAzZ * (kZodIsotropicFrac + (1.0 - kZodIsotropicFrac) * elevFalloffZ), 0.0, 1.0);
+        const float kZodPollutionMaxDim = 0.85;
+
+        const float kZodCloudSuppressPower = 2.0;
+        float visibilityZod = nightFactorEffZ
+                             * (1.0 - moonBrightZ * kZodMoonMaxDim)
+                             * extinctionZ
+                             * (tSurface > 0.0 ? 0.0 : 1.0) // blocked by terrain/ocean
+                             * (moonDiscHit ? 0.0 : 1.0)    // blocked by the Moon's own opaque disc
+                             * pow(clamp(cloudBlock, 0.0, 1.0), kZodCloudSuppressPower)
+                             * (1.0 - domeValZ * kZodPollutionMaxDim);
+
+        color += zodCol * zodShape * cloud.eclipticPoleENU.w * visibilityZod;
     }
 
     // ── Moonlight ambient ──────────────────────────────────────────────────────

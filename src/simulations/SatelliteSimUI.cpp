@@ -2642,7 +2642,7 @@ void SatelliteSim::buildCloudSliderRows(const UIInput &inp, UIRenderer &ui, Clou
     // silently corrupts a neighboring slider's display text — reported as "Opacity scale has a
     // bugged display, can't see what value is selected." Must stay >= (highest idx in use) + 1,
     // same as hovCloudMinus/hovCloudPlus/draggingCloud above.
-    static char cloudBufs[88][16];
+    static char cloudBufs[90][16];
 
     for (int si = 0; si < count; ++si)
     {
@@ -3149,6 +3149,8 @@ void SatelliteSim::buildSettingsAuroraTab(const UIInput &inp, UIRenderer &ui)
         {"Airglow sodium", &airglowSodiumGain, 0.0f, 3.0f, 0.1f, "%.2f", 15},
         {"Airglow coverage", &airglowCoverageGain, 0.0f, 1.0f, 0.05f, "%.2f", 84},
         {"Airglow polar boost (red)", &airglowPolarGain, 0.0f, 6.0f, 0.1f, "%.2f", 85},
+        {"Zodiacal gain", &zodiacalGain, 0.0f, 0.1f, 0.001f, "%.3f", 88},
+        {"Zodiacal width (deg)", &zodiacalWidthDeg, 5.0f, 60.0f, 1.0f, "%.0f", 89},
         {"Storm strength", &stormStrength, 0.0f, 1.0f, 0.05f, "%.2f", 25},
         {"Aurora gain", &auroraGain, 0.0f, 0.1f, 0.001f, "%.3f", 26},
         {"Aurora ground gain", &auroraGroundGain, 0.0f, 0.1f, 0.001f, "%.3f", 27},
@@ -4077,6 +4079,8 @@ void SatelliteSim::loadSettings()
         airglowSodiumGain = c.value("airglow_sodium_gain", airglowSodiumGain);
         airglowCoverageGain = c.value("airglow_coverage_gain", airglowCoverageGain);
         airglowPolarGain = c.value("airglow_polar_gain", airglowPolarGain);
+        zodiacalGain = c.value("zodiacal_gain", zodiacalGain);
+        zodiacalWidthDeg = c.value("zodiacal_width_deg", zodiacalWidthDeg);
         cloudShadowMaxDistM = c.value("shadow_max_dist_m", cloudShadowMaxDistM);
         cloudMaxRenderDistM = c.value("max_render_dist_m", cloudMaxRenderDistM);
         viewSamplesMin = c.value("view_samples_min", viewSamplesMin);
@@ -4257,6 +4261,8 @@ void SatelliteSim::saveSettings()
         {"airglow_sodium_gain", airglowSodiumGain},
         {"airglow_coverage_gain", airglowCoverageGain},
         {"airglow_polar_gain", airglowPolarGain},
+        {"zodiacal_gain", zodiacalGain},
+        {"zodiacal_width_deg", zodiacalWidthDeg},
         {"shadow_max_dist_m", cloudShadowMaxDistM},
         {"max_render_dist_m", cloudMaxRenderDistM},
         {"view_samples_min", viewSamplesMin},

@@ -1168,10 +1168,12 @@ struct GpuCloudParams
     // Airglow coverage + polar boost, 480 -> 496. See cloud_params.glsl for the full design.
     float airglowCoverageGain; // 0 = uniform shimmer (old behaviour), 1 = full patchy coverage
     float airglowPolarGain;    // RED band only: extra boost ramping toward the geomagnetic pole
-    float pad21;
-    float pad22;
+    // Zodiacal light, 496 -> 512. See cloud_params.glsl for the full design.
+    float zodiacalWidthDeg;     // was pad21 — ecliptic-latitude Gaussian sigma near the sun
+    float zodiacalOuterFadeDeg; // was pad22 — elongation at which the cone has faded out
+    glm::vec4 eclipticPoleENU;  // xyz = ENU unit vector to ecliptic north pole, w = zodiacalGain
 };
-static_assert(sizeof(GpuCloudParams) == 496, "GpuCloudParams layout mismatch");
+static_assert(sizeof(GpuCloudParams) == 512, "GpuCloudParams layout mismatch");
 
 // ── Push constants for sat_orbit.comp ────────────────────────────────────────
 // Offsets verified against the push_constant block in sat_orbit.comp.
@@ -2257,6 +2259,13 @@ private:
     glm::vec3 mwRow0{1.0f, 0.0f, 0.0f};
     glm::vec3 mwRow1{0.0f, 1.0f, 0.0f};
     glm::vec3 mwRow2{0.0f, 0.0f, 1.0f};
+    // ── Zodiacal light ecliptic pole (session follow-up) ────────────────────────
+    // ENU-frame unit vector to the ecliptic north pole, recomputed each frame in
+    // updatePositions() alongside the Milky Way basis above. Unlike mwRow0-2 this is not a full
+    // lon/lat basis — zodiacal light is a pure analytic falloff (elongation from the sun +
+    // ecliptic latitude asin(dot(dir, eclipticPoleENU))), not texture-sampled, so only the pole
+    // direction is needed.
+    glm::vec3 eclipticPoleENU{0.0f, 0.0f, 1.0f};
     // Cloud tunables (CPU-side; uploaded to cloudParamsBuf each frame)
     // Defaults below are the user-tuned values baked in from settings.json (most recently
     // 2026-08-10 — cloudDensity, cloudAmbientGain, airglowCoverageGain/PolarGain, and most of the
@@ -2411,6 +2420,9 @@ private:
     float airglowSodiumGain = 0.08f;   // C15: sodium (589.3nm) band gain — kept dim relative to green
     float airglowCoverageGain = 0.32f; // patchy-coverage strength for all 3 airglow bands, [0,1]
     float airglowPolarGain = 2.4f;     // red band only: extra boost toward the geomagnetic pole
+    float zodiacalGain = 0.01f;        // master brightness multiplier for the zodiacal light cone
+    float zodiacalWidthDeg = 10.0f;    // ecliptic-latitude Gaussian sigma near the sun (degrees)
+    float zodiacalOuterFadeDeg = 80.0f; // elongation at which the cone has fully faded (degrees)
     // Sun self-shadow cone (N_CONE) fades out beyond this distance. Was 22 km, when the cone
     // marched a fixed stride and distance directly bought samples. The cone now absorbs distance
     // into its stride (see cloud_march.comp's shadowFade comment), so this became a reach knob
@@ -2570,7 +2582,7 @@ private:
         KB_FASTER = 3,
         KB_REVERSE = 4,
         KB_MOVE_BOOST = 5,     // held
-        KB_MOVE_FINE = 6,      // held
+        KB_MOVE_FINE = 6,      // event — toggles fine (slow) movement mode; see fineMoveToggled
         KB_CINEMATIC = 7,      // event — toggles camera drift mode while panning
         KB_RAISE_ELEV = 8,     // Q — held — raise observer above terrain (gamepad: analog right trigger, see gpElevRaise, not this binding's gpButton)
         KB_LOWER_ELEV = 9,     // E — held — lower observer toward terrain (gamepad: analog left trigger, see gpElevLower)
@@ -2588,7 +2600,7 @@ private:
 
     // Dispatches the event-style action for keybindings[bindIdx] — shared by onKey()
     // (keyboard) and pollGamepad() (gamepad edge-detect) so the two input paths can never
-    // drift apart. No-op for held bindings (MOVE_BOOST/FINE, RAISE/LOWER_ELEV, ZOOM_IN/OUT):
+    // drift apart. No-op for held bindings (MOVE_BOOST, RAISE/LOWER_ELEV, ZOOM_IN/OUT):
     // those are polled directly, not dispatched.
     void dispatchKeyAction(int bindIdx);
 
@@ -2778,6 +2790,11 @@ private:
     float cinematicPitchVel = 0.0f; // pixels-equivalent/s driving elDeg pitch
     bool cinematicActive = false;   // true last frame — used to detect transition-out
 
+    // Fine (slow) movement mode — flipped by KB_MOVE_FINE (dispatchKeyAction). A toggle rather
+    // than a held modifier (unlike KB_MOVE_BOOST): holding a stick-click down while also using
+    // that same stick to move is uncomfortable, so a single press latches slow movement on/off.
+    bool fineMoveToggled = false;
+
     // ── UI hover state (one-frame lag) ────────────────────────────────────────
     std::vector<bool> hovConst;           // one entry per constellation; sized in loadDefinitions()
     std::vector<bool> hovHighlightConst;  // highlight button hover state, parallel to hovConst
@@ -2830,9 +2847,9 @@ private:
                                  // + 1 flare-mitigation tilt (idx 17)
     bool hovPhotoPlus[18] = {};
     bool draggingPhoto[18] = {};
-    bool hovCloudMinus[88] = {}; // was [86] — idx 86/87 are the beam light fade in/out sliders
-    bool hovCloudPlus[88] = {};
-    bool draggingCloud[88] = {}; // MUST stay sized to match hovCloudMinus/Plus — see
+    bool hovCloudMinus[90] = {}; // was [88] — idx 88/89 are the zodiacal light gain/width sliders
+    bool hovCloudPlus[90] = {};
+    bool draggingCloud[90] = {}; // MUST stay sized to match hovCloudMinus/Plus — see
                                  // feedback_cloud_slider_arrays memory: this one was missed once
                                  // already and the out-of-bounds write corrupted the window-chrome
                                  // state declared right below, breaking the settings window.

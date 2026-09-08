@@ -169,12 +169,29 @@ void UIRenderer::init(VulkanContext& ctx, GLFWwindow* window) {
 // loadFont
 // ─────────────────────────────────────────────────────────────────────────────
 void UIRenderer::loadFont(VulkanContext& ctx) {
-    // Try Windows system fonts in order of preference.
-    // Customize this list if deploying on non-Windows systems.
+    // System font search paths, in order of preference, per platform.
+    // stb_truetype reads offset 0 of whatever file is found, which also works for
+    // .ttc collections (e.g. macOS's Helvetica.ttc) since stbtt_GetFontOffsetForIndex(data, 0)
+    // resolves the first face in a collection the same way it resolves a bare .ttf/.otf.
     const char* candidates[] = {
+#if defined(_WIN32)
         "C:/Windows/Fonts/segoeui.ttf",
         "C:/Windows/Fonts/arial.ttf",
         "C:/Windows/Fonts/consola.ttf",
+#elif defined(__APPLE__)
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/Library/Fonts/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+#else
+        // Common Linux distro paths (Fedora, Ubuntu/Debian, Arch package layouts differ).
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/noto-sans/NotoSans-Regular.ttf",
+#endif
     };
 
     std::vector<uint8_t> ttfData;
@@ -192,10 +209,14 @@ void UIRenderer::loadFont(VulkanContext& ctx) {
         found = true;
         break;
     }
-    if (!found)
+    if (!found) {
+        std::string tried;
+        for (const char* path : candidates) { tried += path; tried += ", "; }
         throw std::runtime_error(
-            "UIRenderer: Could not find a TTF font. Tried segoeui.ttf, arial.ttf, consola.ttf "
-            "in C:/Windows/Fonts/. Please set a valid font path in UIRenderer.cpp.");
+            "UIRenderer: Could not find a TTF font. Tried: " + tried +
+            "Please install one of these fonts, or add a valid path to the candidates list "
+            "in UIRenderer::loadFont().");
+    }
 
     font.fileData = std::move(ttfData);
 
