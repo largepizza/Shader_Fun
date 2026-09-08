@@ -1,5 +1,35 @@
 cmake_minimum_required(VERSION 3.20)
 
+# CMake 4.0 REMOVED compatibility with projects declaring cmake_minimum_required(VERSION <3.5),
+# turning what used to be a deprecation warning into a hard configure error. Two of this
+# project's FetchContent dependencies still declare one — glfw 3.4 ("3.4...3.28") and
+# nlohmann/json v3.11.3 ("3.1...3.14") — so a stock CMake 4 (Homebrew's default on macOS since
+# early 2025, and increasingly the Windows/Linux default too) cannot configure this project at
+# all. This variable is CMake's own documented escape hatch: it seeds each dependency's
+# cmake_minimum_required floor without patching vendored sources or pinning older dep tags.
+#
+# This is why the macOS setup originally hardcoded an absolute path to a portable CMake 3.31 in
+# .vscode/settings.json. That worked around the symptom on exactly one machine, at the cost of
+# committing a developer's home directory to the repo. Fixing it here fixes it for every
+# machine and every generator, with nothing user-specific to commit.
+#
+# Unknown to CMake < 3.31, where it is silently ignored — harmless, since those versions still
+# accept the old floors natively. Overridable from the command line for anyone who wants to see
+# the raw deprecation warnings.
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
+
+# macOS deployment target — must be set BEFORE project(), which is what bakes LC_BUILD_VERSION
+# into every object file. Without it, clang defaults to the BUILD machine's OS version, so a
+# binary produced on a macOS 14 CI runner refuses to launch on anything older ("not supported on
+# this version of macOS"). 11.0 is the oldest release with both Apple Silicon and MoltenVK
+# support, and covers the Monterey (12.x) target hardware. See CMAKE_OSX_ARCHITECTURES in
+# CMakePresets.json for the separate arm64/x86_64 question.
+if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
+endif()
+
 # Single source of truth for the version — edit VERSION to cut a release.
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" APP_VERSION)
 string(STRIP "${APP_VERSION}" APP_VERSION)           # remove trailing newline
@@ -237,3 +267,53 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.txt")
         COMMENT "Copying THIRD_PARTY_NOTICES.txt to output directory"
     )
 endif()
+
+# ── Release packaging ─────────────────────────────────────────────────────────
+#   cmake --build <build-dir> --config Release --target package-release
+#
+# Stages the shippable tree and archives it to dist/. Not part of ALL, so a normal build is
+# unaffected. cmake/PackageRelease.cmake holds the actual copy list — CI (release.yml) and
+# release.bat both call this target instead of maintaining their own copies of it.
+#
+# PLATFORM_TAG names the archive. On macOS it distinguishes a universal binary from a
+# single-architecture one, because those are NOT interchangeable on a player's machine: an
+# arm64-only build on an Intel Mac dies with "Bad CPU type in executable" before main() runs.
+if(WIN32)
+    set(SATLIGHT_PLATFORM_TAG "Windows")
+elseif(APPLE)
+    list(LENGTH CMAKE_OSX_ARCHITECTURES _osx_arch_count)
+    if(_osx_arch_count GREATER 1)
+        set(SATLIGHT_PLATFORM_TAG "macOS_universal")
+    elseif(CMAKE_OSX_ARCHITECTURES)
+        set(SATLIGHT_PLATFORM_TAG "macOS_${CMAKE_OSX_ARCHITECTURES}")
+    else()
+        set(SATLIGHT_PLATFORM_TAG "macOS_${CMAKE_HOST_SYSTEM_PROCESSOR}")
+    endif()
+else()
+    set(SATLIGHT_PLATFORM_TAG "Linux")
+endif()
+
+# Bundling the Vulkan loader + MoltenVK only makes sense on macOS, where there is no system
+# Vulkan at all. Windows and Linux both get a loader from the GPU driver / distro package.
+set(SATLIGHT_PACKAGE_VULKAN_SDK "")
+if(APPLE)
+    set(SATLIGHT_PACKAGE_VULKAN_SDK "$ENV{VULKAN_SDK}")
+endif()
+
+add_custom_target(package-release
+    COMMAND ${CMAKE_COMMAND}
+        -DEXE_FILE=$<TARGET_FILE:SatLightSim>
+        -DRUNTIME_DIR=$<TARGET_FILE_DIR:SatLightSim>
+        -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -DOUT_DIR=${CMAKE_CURRENT_SOURCE_DIR}/dist
+        -DAPP_VERSION=${APP_VERSION}
+        -DEXE_BASENAME=${EXE_BASENAME}
+        -DPLATFORM_TAG=${SATLIGHT_PLATFORM_TAG}
+        -DVULKAN_SDK_DIR=${SATLIGHT_PACKAGE_VULKAN_SDK}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/PackageRelease.cmake
+    COMMENT "Packaging release archive into dist/"
+    VERBATIM
+)
+# add_custom_target's own DEPENDS takes FILES, not targets — the target ordering has to come
+# from add_dependencies, or `--target package-release` would happily archive a stale exe.
+add_dependencies(package-release SatLightSim)

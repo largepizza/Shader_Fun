@@ -154,6 +154,9 @@ struct VulkanContext {
                          uint32_t w, uint32_t h, uint32_t mipLevels);
     VkCommandBuffer beginOneTimeCommands();
     void endOneTimeCommands(VkCommandBuffer cmd);
+    // Linear blit filtering is a per-format capability, not a given — see the definition.
+    VkFilter bestBlitFilter(VkFormat fmt) const;
+
     void imageBarrier(VkCommandBuffer cmd, VkImage image,
                       VkAccessFlags srcAccess, VkAccessFlags dstAccess,
                       VkImageLayout oldLayout, VkImageLayout newLayout,
@@ -164,6 +167,9 @@ private:
     void setupDebugMessenger();
     void createSurface(GLFWwindow* window);
     void pickPhysicalDevice();
+    // Logs every device limit this project exceeds the Vulkan guaranteed minimum for, and
+    // throws a named error if one is actually short. See the definition for why each matters.
+    void logDeviceLimits(const VkPhysicalDeviceLimits &lim);
     void createDevice();
     void createSwapchain(GLFWwindow* window);
     void createRenderPass();

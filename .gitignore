@@ -5,7 +5,13 @@ out/
 dist/
 build-win-release/
 build-linux-release/
+build-macos-release/
 .logs/
+
+# Per-developer CMake configuration (SDK paths, generator choice, toolchain overrides).
+# This is where machine-specific values belong — CMakePresets.json is committed and must
+# stay path-free; CMakeUserPresets.json is not and can hold anything local.
+CMakeUserPresets.json
 
 
 # ── Compiled shaders (generated at build time from shaders/) ─────────────────
@@ -38,3 +44,6 @@ benchmarks/
 .venv/
 __pycache__/
 *.pyc
+# Stray run logs from manual launches
+ft_slow.log
+satlight_log.txt

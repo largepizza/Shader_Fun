@@ -2903,9 +2903,12 @@ void SatelliteSim::recordPrePass(VkCommandBuffer cmd, VulkanContext &ctx, float 
     blit.srcOffsets[1] = {(int32_t)skyLowResExtent.width, (int32_t)skyLowResExtent.height, 1};
     blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     blit.dstOffsets[1] = {(int32_t)ctx.swapExtent.width, (int32_t)ctx.swapExtent.height, 1};
+    // Filter chosen per-format rather than hardcoded LINEAR: linear blit filtering is an
+    // optional format feature, and this upscale is on the renderScale<1.0 path that exists
+    // specifically for the weakest hardware — the least safe place to assume it.
     vkCmdBlitImage(cmd, skyLowResColorImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    ctx.swapImages[imgIdx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   1, &blit, VK_FILTER_LINEAR);
+                   1, &blit, ctx.bestBlitFilter(ctx.swapFormat));
     // No further barrier here — activeRenderPass() returns ctx.renderPassLoad when scaled, whose
     // color attachment initialLayout is TRANSFER_DST_OPTIMAL (exactly what the blit just left it
     // in); the render pass's own automatic transition takes it to COLOR_ATTACHMENT_OPTIMAL.

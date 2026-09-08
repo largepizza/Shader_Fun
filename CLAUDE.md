@@ -23,6 +23,80 @@ Shaders: auto-detected glob (`shaders/*.vert|.frag|.comp`), compiled by `glslc`,
 
 **Requirements**: Vulkan SDK + `VULKAN_SDK` env var, CMake 3.20+, MSVC C++20.
 
+### Presets and release packaging
+
+`CMakePresets.json` holds every per-platform configuration (`windows` / `linux` / `macos`, plus
+`*-release` variants and `macos-universal-release`). **It is committed and must stay free of
+absolute paths** — machine-specific values go in `CMakeUserPresets.json`, which is gitignored.
+`.vscode/settings.json` and `launch.json` are committed too and are under the same rule; a
+hardcoded `cmake.cmakePath` and `VULKAN_SDK` under a developer's home directory shipped there once
+(2026-09, macOS-potato branch) and reached the public repo's history.
+
+`cmake --build <dir> --target package-release` stages and archives the distributable into `dist/`.
+`cmake/PackageRelease.cmake` holds the copy list — **the only copy of it**. `.github/workflows/
+release.yml` and `release.bat` both drive that target rather than repeating the list, which they
+previously did five times over (3 CI jobs + 2 batch branches) and had already drifted. On macOS the
+same script bundles the Vulkan loader + MoltenVK into `lib/` and writes the launcher `.command`
+(there is no system Vulkan on macOS; the exe's baked-in `$VULKAN_SDK` path exists only on the build
+machine).
+
+**`CMAKE_POLICY_VERSION_MINIMUM 3.5` at the top of CMakeLists.txt is load-bearing, not cosmetic.**
+CMake 4.0 turned `cmake_minimum_required(VERSION <3.5)` from a deprecation warning into a hard
+configure error, and two FetchContent deps still declare one (glfw 3.4 → `3.4...3.28`,
+nlohmann/json v3.11.3 → `3.1...3.14`). Without it, a stock CMake 4 — Homebrew's default, and
+increasingly Windows'/Linux's — cannot configure this project at all. That failure is what the
+committed absolute path to a portable CMake 3.31 was working around.
+
+### macOS release architecture
+
+The macOS CI job builds a **universal binary** (`CMAKE_OSX_ARCHITECTURES="arm64;x86_64"`) with
+`CMAKE_OSX_DEPLOYMENT_TARGET=11.0`. Both are required and they fix *different* failures:
+- **Architecture.** `macos-14` runners are Apple Silicon, so a default build is arm64-only and an
+  Intel Mac rejects it with **"bad CPU type in executable"** — the kernel refusing to exec a Mach-O
+  with no slice for the host, before any of this app's code runs. Universal is preferred over a
+  second `macos-13` Intel runner job because GitHub is retiring those images, and it ships one
+  download instead of making players choose.
+- **Deployment target.** Without it clang stamps the *build* machine's OS version, and a
+  macOS 14-targeted binary is refused on Monterey (12.x) with "not supported on this version of
+  macOS" — the error that surfaces *next* once the CPU-type one is fixed.
+
+The workflow's `lipo -archs` step fails the build if either slice is missing from the exe **or from
+the bundled dylibs** — LunarG ships universal dylibs, but that is a property of their build, not
+something this workflow controls.
+
+### Old / low-end hardware floor
+
+The 128-byte push-constant trim (see "Subsystem: Weak-Hardware Sky Tiers") is one of several places
+this project sits above a Vulkan *guaranteed minimum*. `VulkanContext::logDeviceLimits()` logs all
+of them every launch and throws a named error when one is short, so a report from a machine nobody
+has access to is answerable. Current margins:
+
+| Limit | Guaranteed min | This app needs | Why |
+|---|---|---|---|
+| `maxPushConstantsSize` | 128 | **128** | every PC struct static_asserts to exactly 128 |
+| `maxImageDimension2D` | 4096 | **14999** | `earth_elevation.png` is 14999×7500 (GCN1/Metal cap is 16384 — little headroom) |
+| `maxImageDimension3D` | 256 | **1024** | `aurora_noise.comp` bakes a 1024×16×256 volume |
+| `maxComputeWorkGroupInvocations` | 128 | **256** | `local_size 16×16` in cloud_march / scene_depth / flare_blur |
+| `maxComputeSharedMemorySize` | 16 KB | ~5.2 KB | tile-cull lists — comfortable |
+| `maxPerStageDescriptorStorageBuffers` | 4 | **6** | `sat_sky.frag`'s set; MoltenVK is the realistic place to hit it, since it maps SSBOs + UBOs + vertex buffers into Metal's 31 per-stage buffer slots |
+| `maxPerStageDescriptorSampledImages` | 16 | 15 | `sat_sky.frag` — one binding from the floor |
+
+**The push-constant gate in `pickPhysicalDevice()` read 144 until 2026-09-08** — the pre-trim
+`SatDrawPC` size — so it rejected precisely the hardware the trim was performed for. Keep that
+constant equal to the largest PC struct; if one grows past 128 the fix is the CloudParams UBO, not
+a bigger number there.
+
+Two more non-guaranteed things are now checked rather than assumed: device **features** are
+verified present before `vkCreateDevice` (requesting an unsupported one fails with
+`VK_ERROR_FEATURE_NOT_PRESENT` and no indication of which), and **linear blit filtering** is a
+per-format optional feature, so `VulkanContext::bestBlitFilter()` picks LINEAR/NEAREST per format
+for both mipmap generation and the `renderScale < 1.0` upscale — the latter being the path that
+exists *for* weak hardware, the least safe place to assume the optional feature.
+
+VRAM is the untested one: the shipped textures are roughly 500 MB of GPU memory before mips
+(8K day/night/clouds/specular/Milky Way + the 14999×7500 R8 DEM ≈ 112 MB on its own), against
+2 GB on a 2015 MacBook Pro R9 M370X. Nothing streams or downsamples them.
+
 ---
 
 ## Architecture

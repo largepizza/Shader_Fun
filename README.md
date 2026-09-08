@@ -17,12 +17,17 @@ aurora, all rendered through Vulkan.
 
 | Dependency | Notes |
 |------------|-------|
-| [Vulkan SDK](https://vulkan.lunarg.com/) | Sets `VULKAN_SDK` env var |
-| CMake 3.20+ | `winget install Kitware.CMake` |
-| Visual Studio 2022 | C++20 + MSBuild |
+| [Vulkan SDK](https://vulkan.lunarg.com/) | Sets `VULKAN_SDK`. On macOS/Linux run its `setup-env.sh` |
+| CMake 3.20+ | `winget install Kitware.CMake` / `brew install cmake` / distro package |
+| Visual Studio 2022 (Windows) | C++20 + MSBuild |
+| Xcode Command Line Tools (macOS) | Clang + the macOS SDK |
 
 GLFW, GLM, Clay (UI), stb (fonts/images), miniaudio, and nlohmann/json are fetched automatically at
 configure time via CMake FetchContent.
+
+Nothing machine-specific is committed: `VULKAN_SDK` and `cmake` are found through the environment
+and `PATH`. Per-developer overrides belong in `CMakeUserPresets.json` (gitignored), never in
+`CMakePresets.json` or `.vscode/`.
 
 ---
 
@@ -39,6 +44,31 @@ to build only.
 Shaders are auto-detected by CMake, compiled by `glslc`, and copied next to the executable. No
 manual shader step needed. The built executable is named `SAT_LIGHT_SIM_V_<version>` (tracks the
 `VERSION` file), e.g. `build/Debug/SAT_LIGHT_SIM_V_1_1_0.exe`.
+
+### Presets (CMake 3.21+)
+
+`CMakePresets.json` carries the per-platform configurations, so no flags need remembering:
+
+```bash
+cmake --preset windows                  # or: linux / macos
+cmake --build --preset windows
+```
+
+### Release packaging
+
+```bash
+cmake --preset windows-release
+cmake --build --preset windows-release --parallel
+cmake --build --preset windows-package     # → dist/SAT_LIGHT_SIM_v<ver>_Windows.zip
+```
+
+`release.bat` wraps the Windows and (via WSL) Linux legs of that. The `package-release` target
+stages exactly what ships — the copy list lives once in `cmake/PackageRelease.cmake`, and CI uses
+the same target, so a local archive and a tagged release have identical layouts.
+
+macOS builds are produced by GitHub Actions as a **universal binary** (arm64 + x86_64, deployment
+target 11.0) — push a `vX.Y.Z` tag. Packaging on macOS also bundles the Vulkan loader + MoltenVK
+and writes a launcher `.command`, since macOS has no system Vulkan.
 
 ---
 

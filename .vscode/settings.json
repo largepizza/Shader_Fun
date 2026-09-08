@@ -3,13 +3,18 @@
     // Build output goes here. CMake Tools reads this automatically.
     "cmake.buildDirectory": "${workspaceFolder}/build",
 
-    // macOS: portable CMake 3.31.7 (Homebrew's CMake 4.x rejects the older
-    // cmake_minimum_required() in some FetchContent deps). Harmless on Windows —
-    // that path won't exist there, and CMake Tools falls back to PATH.
-    "cmake.cmakePath": "cmake",
-    "cmake.configureEnvironment": {
-        "VULKAN_SDK": "${env:VULKAN_SDK}"
-    },
+    // NOTHING MACHINE-SPECIFIC BELONGS IN THIS FILE — it is committed. A hardcoded
+    // cmake.cmakePath / VULKAN_SDK used to live here and leaked a developer's home
+    // directory into git history.
+    //
+    // CMake resolves from PATH, and VULKAN_SDK comes from the Vulkan SDK's own installer
+    // (Windows: set globally; macOS/Linux: `source ~/VulkanSDK/<ver>/setup-env.sh`, which
+    // also sets PATH, VK_LAYER_PATH and DYLD_LIBRARY_PATH). The Homebrew-CMake-4 failure
+    // that motivated the pinned cmake path is fixed properly in CMakeLists.txt
+    // (CMAKE_POLICY_VERSION_MINIMUM), so no pinned CMake is needed on any platform.
+    //
+    // If you genuinely need a per-machine override, put it in CMakeUserPresets.json
+    // (gitignored) or VS Code *user* settings — never here.
 
     // Configure the project automatically when you open the folder
     "cmake.configureOnOpen": true,

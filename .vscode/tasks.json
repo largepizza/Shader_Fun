@@ -2,13 +2,23 @@
     "version": "2.0.0",
     "tasks": [
         {
+            // Default build (Ctrl+Shift+B). Uses the CMake Tools-managed build/ directory,
+            // so it matches whatever configuration the status bar shows.
             "label": "CMake: Build Release",
             "type": "shell",
             "command": "cmake --build build --config Release",
-            "group": "build",
-            "presentation": {
-                "reveal": "always"
-            }
+            "group": { "kind": "build", "isDefault": true },
+            "presentation": { "reveal": "always" }
+        },
+        {
+            // Full release build + dist/ archive, via the presets in CMakePresets.json.
+            // Same target CI runs, so a local archive matches a tagged one byte-for-byte
+            // in layout. Windows preset shown; swap for linux-* / macos-* on those hosts.
+            "label": "CMake: Package Release (Windows)",
+            "type": "shell",
+            "command": "cmake --preset windows-release && cmake --build --preset windows-package",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always" }
         }
     ]
 }

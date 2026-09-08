@@ -12,16 +12,12 @@
             "stopAtEntry": false,
             "cwd": "${command:cmake.launchTargetDirectory}",
             "MIMode": "lldb",
-            "environment": [
-                {
-                    "name": "VULKAN_SDK",
-                    "value": "${env:VULKAN_SDK}"
-                },
-                {
-                    "name": "VK_ICD_FILENAMES",
-                    "value": "/usr/local/share/vulkan/icd.d/MoltenVK_icd.json"
-                }
-            ],
+            // Inherited from the environment, never hardcoded here (this file is committed).
+            // Run `source ~/VulkanSDK/<version>/setup-env.sh` before launching VS Code — it
+            // sets VULKAN_SDK, VK_ICD_FILENAMES (MoltenVK), VK_LAYER_PATH and DYLD_LIBRARY_PATH.
+            // Launching VS Code from Finder does NOT inherit a shell profile; start it with
+            // `code .` from a configured terminal, or add the vars to VS Code user settings.
+            "environment": [],
             "preLaunchTask": "CMake: build"
         },
         {

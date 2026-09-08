@@ -9,9 +9,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 // ─── Validation layers (debug only) ──────────────────────────────────────────
@@ -342,11 +345,17 @@ void VulkanContext::pickPhysicalDevice()
         Log::line(oss.str());
     }
 
-    // The Vulkan spec only guarantees 128 bytes of push-constant space; this project's largest
-    // struct (SatDrawPC) is 144. Near-universally supported in practice, but fail loudly with a
-    // clear message here rather than mysteriously corrupting push constants deep in a draw call
-    // on the rare driver that only offers the guaranteed minimum (see UC5/NEW-2 in RELEASE_v1_1_PLAN.md).
-    constexpr uint32_t kRequiredPushConstantsSize = 144;
+    // The Vulkan spec only guarantees 128 bytes of push-constant space, and every push-constant
+    // struct in this project now fits exactly that (SatDrawPC / PointDrawPC / CloudMarchPC /
+    // SatOrbitPC / SatFlarePC all static_assert == 128 in SatelliteSim.h).
+    //
+    // This gate read 144 until 2026-09-08 — the pre-trim SatDrawPC size. That made it reject
+    // precisely the hardware the 128-byte trim was performed FOR: an old AMD integrated part
+    // reporting the guaranteed minimum would fail here with "requires 144" even though the app
+    // no longer needs more than 128. Keep this number equal to the largest push-constant
+    // struct; if one ever grows past 128 the correct fix is to move fields into the CloudParams
+    // UBO, not to raise this (see "Push-constant relief" in GpuCloudParams).
+    constexpr uint32_t kRequiredPushConstantsSize = 128;
     if (chosen.limits.maxPushConstantsSize < kRequiredPushConstantsSize)
     {
         std::ostringstream oss;
@@ -354,6 +363,84 @@ void VulkanContext::pickPhysicalDevice()
             << " bytes of push constants; this app requires " << kRequiredPushConstantsSize << ".";
         Log::line("FATAL: " + oss.str());
         throw std::runtime_error(oss.str());
+    }
+
+    logDeviceLimits(chosen.limits);
+}
+
+// ─── Device limit / capability audit ──────────────────────────────────────────
+// Every value here is something this project exceeds the Vulkan *guaranteed minimum* for, so
+// each is a real portability cliff on old or mobile-class hardware rather than a theoretical
+// one. They are logged unconditionally (a bug report from a machine nobody has access to is
+// otherwise unanswerable) and the genuinely fatal ones throw with a message naming the asset
+// or shader responsible, instead of surfacing as a vkCreateImage/vkCreateShaderModule failure
+// with no context.
+void VulkanContext::logDeviceLimits(const VkPhysicalDeviceLimits &lim)
+{
+    // Largest 2D texture the app loads: assets/textures/earth_elevation.png at 14999x7500.
+    // Guaranteed minimum is 4096. GCN 1.0 and Metal both allow 16384, so the shipped DEM fits
+    // with little headroom — anything larger needs downscaling, not a bigger number here.
+    constexpr uint32_t kNeeded2D = 14999;
+    // aurora_noise.comp bakes a 1024x16x256 volume; cloud noise is 128^3. Guaranteed minimum
+    // for maxImageDimension3D is only 256, i.e. the aurora volume is 4x over the floor.
+    constexpr uint32_t kNeeded3D = 1024;
+    // cloud_march.comp / scene_depth.comp / flare_blur.comp all dispatch local_size 16x16 = 256
+    // invocations. Guaranteed minimum is 128.
+    constexpr uint32_t kNeededWorkgroupInvocations = 256;
+    // cloud_march.comp's two tile-cull lists: 384 beams x 3 arrays + 128 light indices + counters.
+    constexpr uint32_t kNeededSharedMemory = 6 * 1024;
+
+    {
+        std::ostringstream oss;
+        oss << "Device limits: maxImageDimension2D=" << lim.maxImageDimension2D
+            << " maxImageDimension3D=" << lim.maxImageDimension3D
+            << " maxComputeWorkGroupInvocations=" << lim.maxComputeWorkGroupInvocations
+            << " maxComputeSharedMemorySize=" << lim.maxComputeSharedMemorySize
+            << " maxPerStageDescriptorSampledImages=" << lim.maxPerStageDescriptorSampledImages
+            << " maxPerStageDescriptorStorageBuffers=" << lim.maxPerStageDescriptorStorageBuffers
+            << " maxPerStageDescriptorUniformBuffers=" << lim.maxPerStageDescriptorUniformBuffers
+            << " maxPushConstantsSize=" << lim.maxPushConstantsSize;
+        Log::line(oss.str());
+    }
+
+    struct Requirement
+    {
+        const char *what;
+        uint32_t need;
+        uint32_t have;
+    };
+    const Requirement reqs[] = {
+        {"2D texture size (earth_elevation.png is 14999x7500)", kNeeded2D, lim.maxImageDimension2D},
+        {"3D texture size (aurora noise volume is 1024 wide)", kNeeded3D, lim.maxImageDimension3D},
+        {"compute workgroup invocations (shaders use local_size 16x16)",
+         kNeededWorkgroupInvocations, lim.maxComputeWorkGroupInvocations},
+        {"compute shared memory (cloud_march.comp tile culling)",
+         kNeededSharedMemory, lim.maxComputeSharedMemorySize},
+        // sat_sky.frag's descriptor set binds 15 combined image samplers and 6 storage buffers
+        // in one stage. Guaranteed minimums are 16 and 4 respectively — the storage-buffer count
+        // is the one actually over the floor, and MoltenVK is the realistic place to hit it,
+        // since it maps SSBOs, UBOs and vertex buffers into Metal's 31 per-stage buffer slots.
+        {"per-stage sampled images (sat_sky.frag binds 15)", 15,
+         lim.maxPerStageDescriptorSampledImages},
+        {"per-stage storage buffers (sat_sky.frag binds 6)", 6,
+         lim.maxPerStageDescriptorStorageBuffers},
+    };
+
+    std::ostringstream fail;
+    bool anyFail = false;
+    for (const auto &r : reqs)
+    {
+        if (r.have < r.need)
+        {
+            anyFail = true;
+            fail << "\n  - " << r.what << ": needs " << r.need << ", GPU reports " << r.have;
+        }
+    }
+    if (anyFail)
+    {
+        std::string msg = "This GPU is below the limits this app requires:" + fail.str();
+        Log::line("FATAL: " + msg);
+        throw std::runtime_error(msg);
     }
 }
 
@@ -376,9 +463,33 @@ void VulkanContext::createDevice()
         qCIs.push_back(qci);
     }
 
+    // Requesting a feature the device does not advertise makes vkCreateDevice fail outright with
+    // VK_ERROR_FEATURE_NOT_PRESENT — no indication of WHICH feature, on a code path that runs
+    // before any window content appears. Both of these are near-universal but neither is
+    // guaranteed by the spec, so check availability and report by name.
+    VkPhysicalDeviceFeatures available{};
+    vkGetPhysicalDeviceFeatures(physicalDevice, &available);
+
     VkPhysicalDeviceFeatures features{};
     features.shaderStorageImageExtendedFormats = VK_TRUE; // for rgba8 storage images
     features.largePoints = VK_TRUE;                       // for gl_PointSize in particles
+
+    {
+        const std::pair<const char *, VkBool32> required[] = {
+            {"shaderStorageImageExtendedFormats", available.shaderStorageImageExtendedFormats},
+            {"largePoints", available.largePoints},
+        };
+        std::string missing;
+        for (const auto &[name, have] : required)
+            if (!have)
+                missing += std::string(missing.empty() ? "" : ", ") + name;
+        if (!missing.empty())
+        {
+            std::string msg = "GPU does not support required Vulkan feature(s): " + missing;
+            Log::line("FATAL: " + msg);
+            throw std::runtime_error(msg);
+        }
+    }
 
     // On MoltenVK, VK_KHR_portability_subset MUST be enabled if the device supports it (spec
     // requirement, not optional). Its name macro lives behind vulkan_beta.h/VK_ENABLE_BETA_EXTENSIONS
@@ -879,9 +990,37 @@ void VulkanContext::createImage(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsa
     vkBindImageMemory(device, img, mem, 0);
 }
 
-void VulkanContext::generateMipmaps(VkCommandBuffer cmd, VkImage img, VkFormat /*fmt*/,
+// Linear-filtered vkCmdBlitImage is NOT guaranteed for every format: it requires the source
+// format to advertise VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT for its tiling. Desktop
+// drivers support it for every format this project blits, but the spec allows otherwise and the
+// result of ignoring it is undefined behaviour, not a clean error — so callers pick their filter
+// through here. Results are cached: this is called per texture upload and per scaled frame.
+VkFilter VulkanContext::bestBlitFilter(VkFormat fmt) const
+{
+    static std::map<VkFormat, VkFilter> cache;
+    if (auto it = cache.find(fmt); it != cache.end())
+        return it->second;
+
+    VkFormatProperties props{};
+    vkGetPhysicalDeviceFormatProperties(physicalDevice, fmt, &props);
+    const bool linear =
+        (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+    if (!linear)
+    {
+        std::ostringstream oss;
+        oss << "WARN: format " << (int)fmt << " does not support linear blit filtering; "
+            << "falling back to NEAREST (mipmaps and scaled-resolution upscale will look coarser).";
+        Log::line(oss.str());
+    }
+    VkFilter f = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    cache[fmt] = f;
+    return f;
+}
+
+void VulkanContext::generateMipmaps(VkCommandBuffer cmd, VkImage img, VkFormat fmt,
                                      uint32_t w, uint32_t h, uint32_t mipLevels)
 {
+    const VkFilter blitFilter = bestBlitFilter(fmt);
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     b.image = img;
     b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -918,7 +1057,7 @@ void VulkanContext::generateMipmaps(VkCommandBuffer cmd, VkImage img, VkFormat /
         vkCmdBlitImage(cmd,
             img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            1, &blit, VK_FILTER_LINEAR);
+            1, &blit, blitFilter);
 
         // Transition previous mip TRANSFER_SRC → SHADER_READ_ONLY
         b.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;

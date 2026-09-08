@@ -8,6 +8,10 @@ on:
     tags: ["v*.*.*"]
   workflow_dispatch:
 
+# All three jobs build with the presets in CMakePresets.json and package with the
+# `package-release` CMake target (cmake/PackageRelease.cmake). The staging file list lives
+# there and nowhere else — it used to be duplicated per job here and had already drifted.
+
 jobs:
   # ── Windows ────────────────────────────────────────────────────────────────
   build-windows:
@@ -37,30 +41,18 @@ jobs:
           cache: true
 
       - name: Configure
-        run: cmake -B build-release -S . -DCMAKE_BUILD_TYPE=Release
+        run: cmake --preset windows-release
 
       - name: Build
-        run: cmake --build build-release --config Release --parallel
+        run: cmake --build --preset windows-release --parallel
 
       - name: Package
-        run: |
-          $v   = "${{ steps.ver.outputs.version }}"
-          $vu  = $v -replace '\.','_'
-          $exe = "SAT_LIGHT_SIM_V_${vu}.exe"
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "build-release/Release/$exe"                   dist/
-          Copy-Item build-release/Release/shaders                  dist/ -Recurse
-          Copy-Item build-release/Release/assets                   dist/ -Recurse
-          Copy-Item data/constellations.json        dist/
-          Copy-Item data/constellations.schema.json dist/
-          Copy-Item data/reflector_targets.json     dist/
-          Compress-Archive -Path dist/* -DestinationPath "${{ steps.ver.outputs.archive }}.zip" -Force
-        shell: pwsh
+        run: cmake --build --preset windows-package
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.ver.outputs.archive }}
-          path: ${{ steps.ver.outputs.archive }}.zip
+          path: dist/${{ steps.ver.outputs.archive }}.zip
 
   # ── Linux ──────────────────────────────────────────────────────────────────
   build-linux:
@@ -72,7 +64,7 @@ jobs:
         id: ver
         run: |
           v=$(cat VERSION | tr -d '[:space:]')
-          echo "version=$v"              >> $GITHUB_OUTPUT
+          echo "version=$v"                        >> $GITHUB_OUTPUT
           echo "archive=SAT_LIGHT_SIM_v${v}_Linux" >> $GITHUB_OUTPUT
 
       - name: Install Vulkan SDK
@@ -89,33 +81,43 @@ jobs:
             ninja-build
 
       - name: Configure
-        run: cmake -B build-release -S . -DCMAKE_BUILD_TYPE=Release -G Ninja
+        run: cmake --preset linux-release
 
       - name: Build
-        run: cmake --build build-release --parallel
+        run: cmake --build --preset linux-release --parallel
 
       - name: Package
-        run: |
-          v="${{ steps.ver.outputs.version }}"
-          vu="${v//./_}"
-          exe="SAT_LIGHT_SIM_V_${vu}"
-          mkdir dist
-          cp "build-release/$exe"                     dist/
-          cp -r build-release/shaders                 dist/
-          cp -r build-release/assets                  dist/
-          cp data/constellations.json        dist/
-          cp data/constellations.schema.json dist/
-          cp data/reflector_targets.json     dist/
-          tar -czf "${{ steps.ver.outputs.archive }}.tar.gz" -C dist .
+        run: cmake --build --preset linux-package
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.ver.outputs.archive }}
-          path: ${{ steps.ver.outputs.archive }}.tar.gz
+          path: dist/${{ steps.ver.outputs.archive }}.tar.gz
 
-  # ── macOS ──────────────────────────────────────────────────────────────────
-  # Pinned to macos-14 (not macos-latest) so a GitHub runner-image bump can't
-  # silently change the Xcode/SDK toolchain under this job between releases.
+  # ── macOS (universal: arm64 + x86_64) ──────────────────────────────────────
+  # Pinned to macos-14 (not macos-latest) so a GitHub runner-image bump can't silently
+  # change the Xcode/SDK toolchain under this job between releases.
+  #
+  # macos-14 runners are Apple Silicon, so a default build produces an arm64-ONLY binary.
+  # That is what made the first CI build die with "bad CPU type in executable" on an Intel
+  # Mac: not a signing, quarantine or dylib problem, but the kernel refusing to exec a
+  # Mach-O with no slice for the host architecture — it fails before any of this app's own
+  # code runs. Two things are needed to actually support older Macs, and they are
+  # INDEPENDENT (fixing one still leaves the other failing):
+  #
+  #   1. ARCHITECTURE — CMAKE_OSX_ARCHITECTURES="arm64;x86_64" (macos-universal-release
+  #      preset) builds both slices into one binary. Cross-compiling x86_64 from an Apple
+  #      Silicon runner is a first-class Xcode toolchain feature, and every dependency here
+  #      is built from source by FetchContent, so they inherit the setting automatically.
+  #      Preferred over a macos-13 Intel runner because GitHub is retiring those images —
+  #      universal keeps working from any runner Apple Silicon or not, and ships one
+  #      download instead of making players pick.
+  #
+  #   2. DEPLOYMENT TARGET — CMAKE_OSX_DEPLOYMENT_TARGET=11.0 (set in CMakeLists.txt, and
+  #      pinned again in the preset). Without it clang stamps the BUILD machine's OS
+  #      version, and a macOS 14-targeted binary is rejected on Monterey (12.x) with "not
+  #      supported on this version of macOS" — a *different* error from the CPU-type one,
+  #      and the one that would have surfaced next had the arch been right.
   build-macos:
     runs-on: macos-14
     steps:
@@ -125,8 +127,8 @@ jobs:
         id: ver
         run: |
           v=$(cat VERSION | tr -d '[:space:]')
-          echo "version=$v"              >> $GITHUB_OUTPUT
-          echo "archive=SAT_LIGHT_SIM_v${v}_macOS" >> $GITHUB_OUTPUT
+          echo "version=$v"                                  >> $GITHUB_OUTPUT
+          echo "archive=SAT_LIGHT_SIM_v${v}_macOS_universal" >> $GITHUB_OUTPUT
 
       # See build-windows's comment: switched from humbletim/setup-vulkan-sdk, which
       # cannot produce glslc OR MoltenVK on any platform (both outside its implemented
@@ -139,80 +141,53 @@ jobs:
           cache: true
 
       - name: Configure
-        run: cmake -B build-release -S . -DCMAKE_BUILD_TYPE=Release
+        run: cmake --preset macos-universal-release
 
       - name: Build
-        run: cmake --build build-release --parallel
+        run: cmake --build --preset macos-release --parallel
 
-      # Vulkan on macOS only exists via MoltenVK, loaded at runtime through the
-      # Vulkan loader (libvulkan.1.dylib) as an ICD, not linked in directly. The exe
-      # is built against $VULKAN_SDK, a path that only exists on this CI runner —
-      # on a player's Mac (no Vulkan SDK installed) it would fail to launch with a
-      # dyld "Library not loaded" error unless the loader + MoltenVK + an ICD
-      # manifest travel with the app and the process is pointed at them. There is
-      # no Mac available to verify this recipe end-to-end (only the game's own
-      # VulkanContext.cpp portability-extension fix was build-verified, on
-      # Windows) — treat this step as a documented best-known recipe, not a
-      # confirmed-working one, until someone runs the packaged .command on a
-      # real Mac without the Vulkan SDK installed.
-      - name: Bundle Vulkan runtime (MoltenVK)
-        run: |
-          mkdir -p vulkan-runtime/lib
-          # -L dereferences symlinks (the SDK ships libvulkan.dylib as a symlink to a
-          # versioned file) so we bundle real file content, not a dangling link back to
-          # this CI runner's own $VULKAN_SDK path.
-          cp -L "$VULKAN_SDK"/lib/libvulkan*.dylib vulkan-runtime/lib/
-          cp -L "$VULKAN_SDK"/lib/libMoltenVK.dylib vulkan-runtime/lib/
-          echo "--- bundled dylibs ---"
-          ls -la vulkan-runtime/lib
-          echo "--- dependent-library paths baked into the exe (verify these look sane) ---"
-          v="${{ steps.ver.outputs.version }}"
-          vu="${v//./_}"
-          otool -L "build-release/SAT_LIGHT_SIM_V_${vu}"
-
+      # Packaging bundles $VULKAN_SDK's loader + MoltenVK next to the exe (there is no
+      # system Vulkan on macOS) and writes the launcher .command — see
+      # cmake/PackageRelease.cmake.
       - name: Package
+        run: cmake --build --preset macos-package
+
+      # Fails the build rather than shipping an archive that cannot run on half the target
+      # machines. LunarG ships universal dylibs, but that is a property of THEIR build, not
+      # something this workflow controls — if a future SDK drops the x86_64 slice, the app
+      # binary would still be universal while the loader it needs is not, and the failure
+      # would only show up on an Intel Mac at runtime.
+      - name: Verify universal binary and bundled dylibs
         run: |
-          v="${{ steps.ver.outputs.version }}"
-          vu="${v//./_}"
-          exe="SAT_LIGHT_SIM_V_${vu}"
-          mkdir dist
-          cp "build-release/$exe"            dist/
-          cp -r build-release/shaders        dist/
-          cp -r build-release/assets         dist/
-          cp -r vulkan-runtime/lib           dist/
-          cp data/constellations.json        dist/
-          cp data/constellations.schema.json dist/
-          cp data/reflector_targets.json     dist/
-          cp THIRD_PARTY_NOTICES.txt         dist/
-
-          # Wrapper is what players actually double-click. It regenerates the MoltenVK
-          # ICD manifest with an absolute path on every launch (so it's correct no
-          # matter where the archive is unzipped to) and sets DYLD_FALLBACK_LIBRARY_PATH
-          # so dyld recovers from the exe's baked-in (CI-runner-only) library path by
-          # falling back to the bundled lib/ next to it.
-          cat > "dist/${exe}.command" <<EOF
-          #!/bin/bash
-          DIR="\$(cd "\$(dirname "\$0")" && pwd)"
-          mkdir -p "\$DIR/vulkan/icd.d"
-          cat > "\$DIR/vulkan/icd.d/MoltenVK_icd.json" <<ICD
-          {
-              "file_format_version" : "1.0.0",
-              "ICD": { "library_path": "\$DIR/lib/libMoltenVK.dylib", "api_version" : "1.2.0" }
+          set -euo pipefail
+          d="dist/${{ steps.ver.outputs.archive }}"
+          v="${{ steps.ver.outputs.version }}"; vu="${v//./_}"
+          fail=0
+          check() {
+            archs=$(lipo -archs "$1")
+            echo "  $1 -> $archs"
+            case "$archs" in
+              *arm64*) ;;
+              *) echo "    MISSING arm64"; fail=1 ;;
+            esac
+            case "$archs" in
+              *x86_64*) ;;
+              *) echo "    MISSING x86_64"; fail=1 ;;
+            esac
           }
-          ICD
-          export VK_ICD_FILENAMES="\$DIR/vulkan/icd.d/MoltenVK_icd.json"
-          export VK_DRIVER_FILES="\$DIR/vulkan/icd.d/MoltenVK_icd.json"
-          export DYLD_FALLBACK_LIBRARY_PATH="\$DIR/lib:\${DYLD_FALLBACK_LIBRARY_PATH:-}"
-          exec "\$DIR/${exe}" "\$@"
-          EOF
-          chmod +x "dist/${exe}.command"
-
-          tar -czf "${{ steps.ver.outputs.archive }}.tar.gz" -C dist .
+          echo "--- architectures ---"
+          check "$d/SAT_LIGHT_SIM_V_${vu}"
+          for lib in "$d"/lib/*.dylib; do check "$lib"; done
+          echo "--- minimum OS version stamped into the executable ---"
+          otool -l "$d/SAT_LIGHT_SIM_V_${vu}" | grep -A3 LC_BUILD_VERSION | head -20
+          echo "--- linked libraries (bundled ones resolve via DYLD_FALLBACK_LIBRARY_PATH) ---"
+          otool -L "$d/SAT_LIGHT_SIM_V_${vu}"
+          exit $fail
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.ver.outputs.archive }}
-          path: ${{ steps.ver.outputs.archive }}.tar.gz
+          path: dist/${{ steps.ver.outputs.archive }}.tar.gz
 
   # ── GitHub Release (attaches all three archives) ───────────────────────────
   # Only runs for an actual "git tag vX.Y.Z && git push" trigger. workflow_dispatch runs
