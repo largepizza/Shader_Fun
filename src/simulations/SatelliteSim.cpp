@@ -1838,6 +1838,24 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
         cp.airglowSodiumGain = airglowSodiumGain;
         cp.airglowCoverageGain = airglowCoverageGain;
         cp.airglowPolarGain = airglowPolarGain;
+        // ── Push-constant relief: ex-SatDrawPC / ex-CloudMarchPC fields (see GpuCloudParams) ──
+        // All per-frame-uniform; moved off the push constants so both ranges fit the 128-byte
+        // maxPushConstantsSize floor. skyGlareEased / mwSuppressEased / beamProximityGlow are all
+        // updated earlier in this same recordCompute() call, before this fill.
+        cp.dbgDisableMask = debugDisableMask;
+        cp.showBeamDebugRays = showBeamDebugRays ? 1u : 0u;
+        cp.skyGlareVisibility = skyGlareEased;
+        cp.beamMaxRangeM = beamMaxRangeM;
+        cp.beamSkyGlowGain = beamSkyGlowGain;
+        cp.beamGlowBleedGain = beamGlowBleedGain;
+        cp.beamProximityGlow = beamProximityGlow;
+        cp.mwSuppressEased = mwSuppressEased;
+        cp.cloudShadowRangeM = cloudShadowRangeM;
+        // sat_sky.frag's render target: the low-res prepass extent when renderScale<1 (recordPrePass
+        // draws the sky there and recordDraw's Pass 1 is skipped), else the full swap extent. The
+        // point shaders don't read these — they carry their own always-full-res screenSizePx.
+        cp.skyScreenW = (renderScale < 0.999f) ? (float)skyLowResExtent.width : (float)ctx.swapExtent.width;
+        cp.skyScreenH = (renderScale < 0.999f) ? (float)skyLowResExtent.height : (float)ctx.swapExtent.height;
         cp.shadowMaxDistM = cloudShadowMaxDistM;
         cp.maxRenderDistM = cloudMaxRenderDistM;
         cp.viewSamplesMin = viewSamplesMin;
@@ -2223,17 +2241,10 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
         cpc.sunDirENU = sunDirENU;
         cpc.moonDirENU = moonDirENU;
         cpc.obsECEFDir = glm::vec4(obsDir, obsHeightOffset);
-        cpc.debugDisableMask = debugDisableMask;             // aurora knockout toggle now lives here too
-        cpc.beamMaxRangeM = beamMaxRangeM;                   // C12 follow-up #6
-        cpc.showBeamDebugRays = showBeamDebugRays ? 1u : 0u; // C12 follow-up #12
-        cpc.beamSkyGlowGain = beamSkyGlowGain;               // C12 follow-up #17; #44: now gains the real
-                                                             // per-sample beam->cloud term instead of the
-                                                             // deleted analytic tube
-        cpc.cloudShadowRangeM = cloudShadowRangeM;
-        // C12 follow-up #39: cpc.beamGlowBleedGain removed — the near-field bleed/march it drove
-        // in this shader was removed entirely; see buildSatDrawPC() for its new home.
-        // C12 follow-up #44: cpc.daySuppression/beamExtinctionMult/beamNearFieldFadeM removed —
-        // all three existed only for the analytic beam sky-glow block deleted this round.
+        // debugDisableMask / beamMaxRangeM / showBeamDebugRays / beamSkyGlowGain / cloudShadowRangeM
+        // moved into the CloudParams UBO (this shader binds it) so CloudMarchPC fits the 128-byte
+        // maxPushConstantsSize floor — filled in the CloudParams block above, read shader-side as
+        // cloud.dbgDisableMask etc.
 
         uint32_t halfW = (ctx.swapExtent.width + 1) / 2;
         uint32_t halfH = (ctx.swapExtent.height + 1) / 2;
@@ -2524,7 +2535,7 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
                          VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
-        SatDrawPC tpc = buildSatDrawPC(ctx, trailAccumExtent); // trailAccumExtent == ctx.swapExtent
+        PointDrawPC tpc = buildPointDrawPC(ctx); // screenSizePx == ctx.swapExtent == trailAccumExtent
         // This offscreen render pass has no depth attachment — see sat_point.frag/star_point.frag's
         // own terrain-occlusion comment. ppc below inherits this via its `= tpc` copy.
         tpc.manualTerrainTest = 1.0f;
@@ -2556,7 +2567,7 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
         }
         if (showPlanets && planetDescSet != VK_NULL_HANDLE && trailStarPipeline != VK_NULL_HANDLE)
         {
-            SatDrawPC ppc = tpc;
+            PointDrawPC ppc = tpc;
             ppc.noTwinkle = 1.0f;
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, trailStarPipeline);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2803,13 +2814,16 @@ void SatelliteSim::formatSelectedSatInfo()
 // (the camera's real aspect ratio never changes just because the sky pass rendered smaller), but
 // screenSizePx must reflect the actual target so gl_FragCoord-based UV math in the shader stays
 // correct (see that field's comment in sat_sky.frag for why).
-SatDrawPC SatelliteSim::buildSatDrawPC(VulkanContext &ctx, VkExtent2D targetExtent)
+// Sky-background push constants (128 bytes). The former tail (debugDisableMask, screenSizePx, the
+// beam/Milky-Way scalars) now rides in the CloudParams frame UBO — filled in recordCompute()'s
+// CloudParams block, which is why this no longer needs a target-extent argument (skyScreenW/H go in
+// the UBO, chosen there from renderScale). See SatDrawPC in SatelliteSim.h.
+SatDrawPC SatelliteSim::buildSkyDrawPC(VulkanContext &ctx)
 {
     SatDrawPC pc{};
     pc.skyView = camera.viewMatrix();
     pc.fovYRad = glm::radians(camera.fovYDeg);
     pc.aspect = (float)ctx.swapExtent.width / (float)ctx.swapExtent.height;
-    pc.screenSizePx = glm::vec2((float)targetExtent.width, (float)targetExtent.height);
     pc.gmst = (float)fmod(kOmegaEarth * (simDayJ2000 * 86400.0 + simSecInDay), glm::two_pi<double>());
     // Wave time relative to sim epoch: pauses when paused, scales with time warp.
     // Sim sec works great as it resets before any crazy floating point issues happen. Great for any animations that need a time variable.
@@ -2821,14 +2835,27 @@ SatDrawPC SatelliteSim::buildSatDrawPC(VulkanContext &ctx, VkExtent2D targetExte
     // cloud_march.comp dispatch there needs them before this function even runs. See the
     // comment at that relocation site for why.
     pc.obsECEFDir = glm::vec4(obsDir, obsHeightOffset); // w = user altitude offset above terrain (m); GPU computes ground height
-    pc.debugDisableMask = debugDisableMask;             // perf knockout toggles — see SatelliteSim.h member comment
-    pc.skyGlareVisibility = skyGlareEased;              // sun-glare gate for the Milky Way — see skyGlareEased member comment
-    pc.beamMaxRangeM = beamMaxRangeM;                   // C12 follow-up #6
-    pc.beamSkyGlowGain = beamSkyGlowGain;               // C12 follow-up #18 — shared with cloud_march.comp's copy
-    pc.beamGlowBleedGain = beamGlowBleedGain;           // C12 follow-up #39 — moved here from CloudMarchPC;
-                                                        // now drives this shader's own beam sky-glow wash
-    pc.beamProximityGlow = beamProximityGlow;           // C12 follow-up #41
-    pc.mwSuppressEased = mwSuppressEased;               // Milky Way's own pollution hysteresis — see member comment
+    return pc;
+}
+
+// Point-sprite push constants (128 bytes) for the satellite / star / planet / trail draws. Only
+// the two per-draw flags (noTwinkle, manualTerrainTest) genuinely need to be here rather than in
+// the frame UBO — callers set them: noTwinkle=1 on the planet draw, manualTerrainTest=1 on the
+// trail draws. screenSizePx is always the true swap extent (point draws never render at
+// renderScale<1). debugDisableMask carries only for sat_point.frag's knockout bit 4096.
+PointDrawPC SatelliteSim::buildPointDrawPC(VulkanContext &ctx)
+{
+    PointDrawPC pc{};
+    pc.skyView = camera.viewMatrix();
+    pc.fovYRad = glm::radians(camera.fovYDeg);
+    pc.aspect = (float)ctx.swapExtent.width / (float)ctx.swapExtent.height;
+    pc.waveTime = simSecInDay * 1.0f;
+    pc.noTwinkle = 0.0f;
+    pc.moonDirENU = moonDirENU;
+    pc.obsECEFDir = glm::vec4(obsDir, obsHeightOffset);
+    pc.screenSizePx = glm::vec2((float)ctx.swapExtent.width, (float)ctx.swapExtent.height);
+    pc.debugDisableMask = debugDisableMask;
+    pc.manualTerrainTest = 0.0f;
     return pc;
 }
 
@@ -2837,7 +2864,7 @@ void SatelliteSim::recordPrePass(VkCommandBuffer cmd, VulkanContext &ctx, float 
     if (renderScale >= 0.999f)
         return; // full-res: Pass 1 draws inline in recordDraw as before, nothing to pre-render here
 
-    SatDrawPC pc = buildSatDrawPC(ctx, skyLowResExtent);
+    SatDrawPC pc = buildSkyDrawPC(ctx); // low-res target size rides in the CloudParams UBO (skyScreenW/H)
 
     // ── Low-res sky/ground background, into its own offscreen target ─────────────────────────
     VkClearValue clear = clearColor();
@@ -2886,7 +2913,8 @@ void SatelliteSim::recordPrePass(VkCommandBuffer cmd, VulkanContext &ctx, float 
 
 void SatelliteSim::recordDraw(VkCommandBuffer cmd, VulkanContext &ctx, float /*dt*/)
 {
-    SatDrawPC pc = buildSatDrawPC(ctx, ctx.swapExtent);
+    SatDrawPC skyPc = buildSkyDrawPC(ctx);      // Pass 1 (sky background) — skyBgPipeLayout
+    PointDrawPC pc = buildPointDrawPC(ctx);     // Passes 2/3/3.5 (satellite/star/planet points)
 
     // ── Pass 1: sky/ground background (fullscreen triangle, opaque) ──────────
     // Skipped when renderScale < 1.0 — already rendered (at low res) and blitted into this
@@ -2934,7 +2962,7 @@ void SatelliteSim::recordDraw(VkCommandBuffer cmd, VulkanContext &ctx, float /*d
                                     skyBgPipeLayout, 0, 1, &skyDescSet, 0, nullptr);
             vkCmdPushConstants(cmd, skyBgPipeLayout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                               0, sizeof(pc), &pc);
+                               0, sizeof(skyPc), &skyPc);
             vkCmdDraw(cmd, 3, 1, 0, 0);
         }
         // Isolates the sky/terrain/ocean/cloud-composite fragment shader's own cost from the
@@ -6571,7 +6599,7 @@ void SatelliteSim::createDrawPipeline(VulkanContext &ctx)
         // C12 follow-up #33: FRAGMENT added so sat_point.frag can read screenSizePx for its new
         // cloud-occlusion sampling (previously vertex-only, since the fragment shader used no
         // push constants at all before this).
-        VkPushConstantRange drawPcr{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SatDrawPC)};
+        VkPushConstantRange drawPcr{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PointDrawPC)};
         VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         li.setLayoutCount = 1;
         li.pSetLayouts = &descLayout;
@@ -7234,7 +7262,7 @@ void SatelliteSim::createTrailPipelines(VulkanContext &ctx)
         ci.pMultisampleState = &ms;
         ci.pDepthStencilState = &ds;
         ci.pColorBlendState = &cb;
-        ci.layout = drawPipeLayout; // reused unchanged — same SatDrawPC push-constant range
+        ci.layout = drawPipeLayout; // reused unchanged — same PointDrawPC push-constant range
         ci.renderPass = trailAccumRenderPass;
         ci.subpass = 0;
         if (vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &ci, nullptr, &trailSatPipeline) != VK_SUCCESS)
@@ -7623,7 +7651,7 @@ void SatelliteSim::createStarPipeline(VulkanContext &ctx)
     {
         // FRAGMENT added (session 30 bug fix): star_point.frag now reads screenSizePx for cloud
         // occlusion, same reason sat_point.frag's drawPipeLayout adds it (C12 follow-up #33).
-        VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SatDrawPC)};
+        VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PointDrawPC)};
         VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         li.setLayoutCount = 1;
         li.pSetLayouts = &starDescLayout;

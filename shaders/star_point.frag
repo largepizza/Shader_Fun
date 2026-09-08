@@ -44,29 +44,20 @@ layout(set = 0, binding = 3) uniform sampler2D cloudTargetB; // rgb = A_total (c
 // depth attachment of its own) sets pc.manualTerrainTest and pays for the fetch.
 layout(set = 0, binding = 4) uniform sampler2D sceneDepthTex;
 
-// Declares only the fields this shader reads, at their real SatDrawPC byte offsets — same
-// "prefix of the shared push-constant block" trick sat_point.frag/star_point.vert already use,
-// extended through manualTerrainTest (offset 172) for the long-exposure trail follow-up.
+// Declares a prefix of PointDrawPC (128 bytes — see SatelliteSim.h), through manualTerrainTest,
+// the last field this shader reads. screenSizePx/manualTerrainTest moved here from the old shared
+// SatDrawPC tail so both point pipeline layouts fit the 128-byte maxPushConstantsSize floor.
 layout(push_constant) uniform PC {
-    mat4  skyView;          // offset 0 — unused here, declared for layout consistency
-    float fovYRad;          // offset 64
-    float aspect;           // offset 68
-    float gmst;              // offset 72
-    float waveTime;          // offset 76
-    vec4  sunDirENU;         // offset 80
-    vec4  moonDirENU;        // offset 96
-    vec4  obsECEFDir;        // offset 112
-    uint  debugDisableMask;  // offset 128 — unused here
-    float pad0;              // offset 132
-    vec2  screenSizePx;      // offset 136
-    float skyGlareVisibility; // offset 144 — unused here
-    float beamMaxRangeM;      // offset 148 — unused here
-    float beamSkyGlowGain;    // offset 152 — unused here
-    float beamGlowBleedGain;  // offset 156 — unused here
-    float beamProximityGlow;  // offset 160 — unused here
-    float noTwinkle;          // offset 164 — unused here (star_point.vert reads its own copy)
-    float mwSuppressEased;    // offset 168 — unused here
-    float manualTerrainTest;  // offset 172 — 1 = do the manual sceneDepthTex hit-test below
+    mat4  skyView;            // offset 0   — unused here
+    float fovYRad;            // offset 64  — unused here
+    float aspect;             // offset 68  — unused here
+    float waveTime;           // offset 72  — unused here
+    float noTwinkle;          // offset 76  — unused here (star_point.vert reads its own copy)
+    vec4  moonDirENU;         // offset 80  — unused here
+    vec4  obsECEFDir;         // offset 96  — unused here
+    vec2  screenSizePx;       // offset 112 — full-res target size for the cloud/depth UVs below
+    uint  debugDisableMask;   // offset 120 — unused here
+    float manualTerrainTest;  // offset 124 — 1 = do the manual sceneDepthTex hit-test below
 } pc;
 
 const float kNoSurfaceT = 1e30; // mirrors common.glsl's constant — this shader skips the #include

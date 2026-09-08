@@ -12,13 +12,13 @@ layout(set = 0, binding = 1) readonly buffer SatVisibleBuf {
 };
 
 // ── Camera push constants ─────────────────────────────────────────────────────
-// Declares only the fields this shader reads; total SatDrawPC is 128 bytes.
+// Declares only the fields this shader reads (a prefix of PointDrawPC, 128 bytes — see
+// SatelliteSim.h). skyView/fovYRad/aspect are at the same offsets they were in the old shared
+// SatDrawPC, so nothing here changes.
 layout(push_constant) uniform PC {
     mat4  skyView;
     float fovYRad;
     float aspect;
-    float gmst;  // offset 72 — unused here, declared for layout consistency
-    float pad;   // offset 76
 } pc;
 
 layout(location = 0) out vec3  fragColor;

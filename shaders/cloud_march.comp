@@ -34,23 +34,10 @@ layout(push_constant) uniform PC {
     vec4  sunDirENU;
     vec4  moonDirENU;
     vec4  obsECEFDir;   // xyz = observer ECEF unit vector
-    uint  debugDisableMask; // perf knockout toggles — mirrors SatDrawPC's; bit 32 (aurora curtain
-                            // march), bit 64 (cloud self-shadow light cone), and bit 128
-                            // (Reflect-Orbital beams, C12 follow-up #44) are the ones meaningful
-                            // here — all three live only in this shader now
-    float beamMaxRangeM; // C12 follow-up #6 — settings-tunable Reflect-Orbital beam render range
-    uint  showBeamDebugRays; // C12 follow-up #12 — debug pointing-ray visualization toggle
-    float beamSkyGlowGain; // C12 follow-up #17 — settings-tunable brightness for the beam->cloud
-                           // illumination term (C12 follow-up #44 — this used to gain the old
-                           // analytic sky tube; it's that term's direct successor, not a new
-                           // concept, so it keeps the same slider).
-    float cloudShadowRangeM;  // distance (m) beyond which the per-pixel terrain cloud shadow fades
-                              // out and stops being marched — see the call site in main()
-    // (daySuppression/beamExtinctionMult/beamNearFieldFadeM lived here — all three existed only
-    //  for the analytic beam sky-glow block deleted in C12 follow-up #44. The new per-sample
-    //  beam-cloud term gates day/night with the march's own per-sample sampleDayness instead, and
-    //  has no separate extinction/near-field-fade concept — it's a real volumetric term, not a
-    //  closed-form stand-in that needed its own fade heuristics.)
+    // Trimmed to 128 bytes (maxPushConstantsSize floor). debugDisableMask / beamMaxRangeM /
+    // showBeamDebugRays / beamSkyGlowGain / cloudShadowRangeM moved into the CloudParams UBO this
+    // shader already binds — read below as cloud.dbgDisableMask / cloud.beamMaxRangeM /
+    // cloud.showBeamDebugRays / cloud.beamSkyGlowGain / cloud.cloudShadowRangeM.
 } pc;
 
 layout(set = 0, binding = 0) uniform sampler2D earthCloudsTex;
@@ -86,7 +73,7 @@ layout(set = 0, binding = 9) uniform sampler3D cloudWarpNoiseTex;
 
 // ── Reflect-Orbital ground beams (C12) — written by sat_orbit.comp. Capped atomic-append, no site
 // keying/arbitration — see the ReflectBeamsBuf comment in sat_orbit.comp for the full history/
-// rationale. Read here by main()'s per-pixel beam loop (gated by pc.showBeamDebugRays) for the
+// rationale. Read here by main()'s per-pixel beam loop (gated by cloud.showBeamDebugRays) for the
 // visible ray only. Cloud illumination reads BeamCloudLightBuf below instead — a small CPU-built
 // per-BEAM (not per-target) list, fed forward into cloudMarchCS's per-sample loop; see that
 // struct's own comment for the 2026-08-09 design history.
@@ -1006,12 +993,12 @@ void cullCloudLightsForTile(vec3 cAxis, float tileHalfAngle, vec3 obsPos) {
         sTileLightCount = 0u;
         // Bit 131072 turns this cull off alongside the pointing-ray one — same A/B, same
         // requirement that the image be pixel-identical either way.
-        sTileLightOverflow = ((pc.debugDisableMask & 131072u) != 0u) ? 1u : 0u;
+        sTileLightOverflow = ((cloud.dbgDisableMask & 131072u) != 0u) ? 1u : 0u;
     }
     barrier();
 
-    if ((pc.debugDisableMask & 128u) == 0u && pc.beamSkyGlowGain > 0.0
-        && (pc.debugDisableMask & 131072u) == 0u) {
+    if ((cloud.dbgDisableMask & 128u) == 0u && cloud.beamSkyGlowGain > 0.0
+        && (cloud.dbgDisableMask & 131072u) == 0u) {
         vec2  shellT    = raySphere(obsPos, cAxis, R_EARTH + cloud.layers[1].shellAltM);
         float tRangeMax = max(shellT.y, 0.0) * kTileRangeMargin;
         float slack     = tRangeMax * tileHalfAngle;
@@ -1045,7 +1032,7 @@ void cullCloudLightsForTile(vec3 cAxis, float tileHalfAngle, vec3 obsPos) {
 // longer carries a beam term at all, removed with the second design).
 vec3 beamCloudLighting(vec3 p, float h, vec3 dir, vec3 obsPos, float sampleDayness) {
     vec3 beamLit = vec3(0.0);
-    if ((pc.debugDisableMask & 128u) != 0u || pc.beamSkyGlowGain <= 0.0 || beamLightCount == 0u)
+    if ((cloud.dbgDisableMask & 128u) != 0u || cloud.beamSkyGlowGain <= 0.0 || beamLightCount == 0u)
         return beamLit;
 
     const float kBeamCloudGlowScale = 1e-6;
@@ -1090,7 +1077,7 @@ vec3 beamCloudLighting(vec3 p, float h, vec3 dir, vec3 obsPos, float sampleDayne
         mag += vec3(1.0, 0.97, 0.92) * (g * hFadeBeam * ph);
     }
 
-    beamLit = mag * pc.beamSkyGlowGain * (1.0 - sampleDayness) * kBeamCloudGlowScale;
+    beamLit = mag * cloud.beamSkyGlowGain * (1.0 - sampleDayness) * kBeamCloudGlowScale;
     return beamLit;
 }
 
@@ -1139,7 +1126,7 @@ void cloudMarchCS(
     // bucket (cirrus, fog, aurora, airglow red, the beam pointing ray, the per-pixel cloud shadow).
     // The out-params above are already the exact "no cloud on this ray" values every early-return
     // below leaves them at, so skipping here is the same no-op fallback, not a new code path.
-    if ((pc.debugDisableMask & 32768u) != 0u) return;
+    if ((cloud.dbgDisableMask & 32768u) != 0u) return;
     if (cloud.layers[0].enabled < 0.5) return;
 
     float cloudAltFade = 1.0 - smoothstep(kCloud3DFadeStart, kCloud3DFadeEnd, obsEffH);
@@ -1459,7 +1446,7 @@ void cloudMarchCS(
             float sampleDist = t + step * 0.5;
             float shadowFade = 1.0 - smoothstep(cloud.shadowMaxDistM * 0.6, cloud.shadowMaxDistM, sampleDist);
             float sunOptDepth = 0.0;
-            if (shadowFade > 0.01 && (pc.debugDisableMask & 64u) == 0u) {
+            if (shadowFade > 0.01 && (cloud.dbgDisableMask & 64u) == 0u) {
                 vec2  tConeExit = raySphere(p, sunDir, cloudTop);
                 // The shellThick*2 cap is what bounds how much optical depth the cone can ever
                 // accumulate, and therefore how dark a back-lit cloud can get. At a grazing sun
@@ -2035,7 +2022,7 @@ void cirrusMarchCS(
     // same reason. Cirrus had no knockout at all before this, so its cost was permanently invisible
     // inside the cloud_march bucket AND unreachable by the preset system (no preset can turn it
     // off — the tiers only scale cloudDistFadeStartM/EndM, which it happens to share with cloud).
-    if ((pc.debugDisableMask & 16384u) != 0u) return;
+    if ((cloud.dbgDisableMask & 16384u) != 0u) return;
     if (cloud.layers[1].enabled < 0.5) return;
     float cirrusAltFade = 1.0 - smoothstep(kCloud3DFadeStart, kCloud3DFadeEnd, obsEffH);
     if (cirrusAltFade < 0.001) return;
@@ -2199,7 +2186,7 @@ void fogMarchCS(
 
     A_fog = vec3(1.0);
     B_fog = vec3(0.0);
-    if ((pc.debugDisableMask & 2048u) != 0u) return;
+    if ((cloud.dbgDisableMask & 2048u) != 0u) return;
     if (cloud.fogCoverage <= 0.0 || cloud.fogTopAltM <= 0.0) return;
 
     float fogTopAlt = cloud.fogTopAltM;
@@ -2382,22 +2369,22 @@ void cullBeamsForTile(vec3 cAxis, float tileHalfAngle, vec3 obsPos) {
         // If beams instead appear/disappear on a 16x16-texel grid with the cull ON, the
         // conservatism bound in this function's header is wrong and the slack term needs widening
         // — that is the one failure mode this design can have, and it is unmistakable on screen.
-        sTileOverflow  = ((pc.debugDisableMask & 131072u) != 0u) ? 1u : 0u;
+        sTileOverflow  = ((cloud.dbgDisableMask & 131072u) != 0u) ? 1u : 0u;
     }
     barrier();
 
     // Uniform across the workgroup (push constants only), so the barriers above and below stay in
     // uniform control flow while the scan itself is skipped when beams aren't drawn at all.
-    if (pc.showBeamDebugRays != 0u && (pc.debugDisableMask & 8192u) == 0u
-        && (pc.debugDisableMask & 131072u) == 0u) {
+    if (cloud.showBeamDebugRays != 0u && (cloud.dbgDisableMask & 8192u) == 0u
+        && (cloud.dbgDisableMask & 131072u) == 0u) {
         uint activeCount = min(beamCount, BEAM_MAX_ACTIVE);
         for (uint bi = gl_LocalInvocationIndex; bi < activeCount; bi += gl_WorkGroupSize.x * gl_WorkGroupSize.y) {
             if (beams[bi].intensity <= 0.0) continue;
 
             // View-independent fades, hoisted out of the per-texel loop.
             float targetDistM = length(beams[bi].targetENU);
-            if (targetDistM > pc.beamMaxRangeM + kSkyBeamFadeM) continue;
-            float rangeX    = clamp((targetDistM - (pc.beamMaxRangeM - kSkyBeamFadeM)) / kSkyBeamFadeM, 0.0, 1.0);
+            if (targetDistM > cloud.beamMaxRangeM + kSkyBeamFadeM) continue;
+            float rangeX    = clamp((targetDistM - (cloud.beamMaxRangeM - kSkyBeamFadeM)) / kSkyBeamFadeM, 0.0, 1.0);
             float rangeFade = 1.0 - (rangeX * rangeX * (3.0 - 2.0 * rangeX));
             float aimFade   = 1.0 - smoothstep(0.0, kDebugRayAimMaxRad, beams[bi].aimErrorRad);
             float fade      = rangeFade * aimFade;
@@ -2521,7 +2508,7 @@ void main() {
     // correct: terrain that blocks the view of the much-closer cloud layer necessarily blocks the
     // far higher aurora shell along that same ray too).
     vec3 auroraContrib = vec3(0.0);
-    if ((pc.debugDisableMask & 32u) == 0u) {
+    if ((cloud.dbgDisableMask & 32u) == 0u) {
         auroraContrib = auroraMarchCS(obsPos, dir, enuX, enuY, enuZ, sunDir, sunDirECEF,
                                        obsEffH, pc.moonDirENU, tScene);
     }
@@ -2537,7 +2524,7 @@ void main() {
 
     // Airglow red band (moved here this session — perf). No cloud-suppression term — the
     // original never had one either, just a plain additive contribution.
-    if ((pc.debugDisableMask & 16u) == 0u) {
+    if ((cloud.dbgDisableMask & 16u) == 0u) {
         B_total += airglowRedMarchCS(obsPos, dir, enuX, enuY, enuZ, sunDirECEF, obsEffH, tScene);
     }
 
@@ -2575,7 +2562,7 @@ void main() {
     // taken so far AND unreachable by every graphics preset (Planetarium sets bit 128 and still
     // pays for this in full), which makes it the prime suspect for the several-ms floor the
     // cloud_march bucket keeps even at Planetarium with cloudCoverage=0.
-    if (pc.showBeamDebugRays != 0u && (pc.debugDisableMask & 8192u) == 0u) {
+    if (cloud.showBeamDebugRays != 0u && (cloud.dbgDisableMask & 8192u) == 0u) {
         // Thin off-white/yellow line (2026-08-06 user request; previously a 2500 m green tube,
         // itself already thinned from 15000 m in C12 follow-up #13). kDebugRayMinAngRad keeps a
         // distant ray from thinning below roughly one half-res pixel and breaking up into an
@@ -2671,8 +2658,8 @@ void main() {
                 // below, just keyed on range instead of slew/altitude. Kept in sync with
                 // kGroundBeamFadeM in SatelliteSim.cpp/sat_sky.frag (same visual beam, same feel).
                 float targetDistM = length(beams[bi].targetENU);
-                if (targetDistM > pc.beamMaxRangeM + kSkyBeamFadeM) continue;
-                float rangeX = clamp((targetDistM - (pc.beamMaxRangeM - kSkyBeamFadeM)) / kSkyBeamFadeM, 0.0, 1.0);
+                if (targetDistM > cloud.beamMaxRangeM + kSkyBeamFadeM) continue;
+                float rangeX = clamp((targetDistM - (cloud.beamMaxRangeM - kSkyBeamFadeM)) / kSkyBeamFadeM, 0.0, 1.0);
                 float rangeFade = 1.0 - (rangeX * rangeX * (3.0 - 2.0 * rangeX));
                 float aimFade = 1.0 - smoothstep(0.0, kDebugRayAimMaxRad, beams[bi].aimErrorRad);
                 preFade = rangeFade * aimFade;
@@ -2839,8 +2826,8 @@ void main() {
     // had. Cost scales with how much of the screen is BOTH ground and within range, which from
     // orbit is now approximately none.
     float terrainSunT = 1.0;
-    if (tScene < kNoSurfaceT && (pc.debugDisableMask & 256u) == 0u) {
-        float shadowFade = 1.0 - smoothstep(pc.cloudShadowRangeM * 0.6, pc.cloudShadowRangeM, tScene);
+    if (tScene < kNoSurfaceT && (cloud.dbgDisableMask & 256u) == 0u) {
+        float shadowFade = 1.0 - smoothstep(cloud.cloudShadowRangeM * 0.6, cloud.cloudShadowRangeM, tScene);
         if (shadowFade > 0.001) {
             vec3  hitENU  = obsPos + tScene * dir;
             vec3  hitECEF = hitENU.x * enuX + hitENU.y * enuY + hitENU.z * enuZ;

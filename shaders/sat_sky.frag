@@ -1,69 +1,25 @@
 #version 450
 
-// ── Camera + sun push constants (same layout as C++ SatDrawPC, 172 bytes) ─────
+// ── Camera + sun push constants (same layout as C++ SatDrawPC, 128 bytes) ─────
 // The pipeline layout declares VK_SHADER_STAGE_VERTEX_BIT|FRAGMENT_BIT so both
 // stages share one push constant range.  The fragment uses skyView/fovYRad to
 // project glowBuf ENU directions into screen UV for the lens flare pass.
+//
+// Trimmed to 128 bytes (the maxPushConstantsSize floor). The fields that used to trail past
+// offset 128 (debugDisableMask, screenSizePx, skyGlareVisibility, beamMaxRangeM, beamSkyGlowGain,
+// beamGlowBleedGain, beamProximityGlow, mwSuppressEased) are all per-frame-uniform and now live
+// in the CloudParams UBO this shader already binds — read below as cloud.dbgDisableMask,
+// vec2(cloud.skyScreenW, cloud.skyScreenH), cloud.skyGlareVisibility, cloud.beamMaxRangeM, etc.
 layout(push_constant) uniform PC {
     mat4  skyView;     // ENU -> camera space (rotation, no translation)
     float fovYRad;     // vertical field of view in radians
     float aspect;      // viewport width / height
     float gmst;        // Greenwich Mean Sidereal Time (radians)
-    float waveTime;    // wall-clock seconds for wave animation
+    float waveTime;    // sim seconds for wave animation
     vec4  sunDirENU;   // xyz = sun dir in ENU, w = sin(sun elevation)
     vec4  moonDirENU;  // xyz = moon dir in ENU, w = illuminated fraction
     vec4  obsECEFDir;  // xyz = observer ECEF unit vector; w = obsHeightOffset (m)
-    uint  debugDisableMask; // profiling-only knockout toggles — see dbgSkip* helpers below
-    float pad0;         // explicit — matches C++ SatDrawPC's alignment padding before the vec2 below
-    vec2  screenSizePx; // CURRENT render target's pixel size (session 29, resolution scaling) —
-                        // gl_FragCoord.xy is relative to THIS draw's own framebuffer, not always
-                        // the full swapchain; any [0,1] UV derived from gl_FragCoord must divide
-                        // by this, not an assumed full-res constant. See cloud composite sample
-                        // below for why this matters.
-    float skyGlareVisibility; // eased sun-glare gate for stars/Milky Way, computed CPU-side each
-                        // frame in recordCompute() (skyGlareEased) — 0 when the sun is on screen,
-                        // sunlitBgVisibility (settings-tunable) when off-screen but the observer
-                        // is still in direct sunlight, 1.0 at true night. See Milky Way section.
-    // (cloudShadowRangeM and cloudShadowResidualM were here — both only existed to address
-    //  cloud_shadow.comp's observer-centred grid and undo its texel snapping. That pass is gone;
-    //  the shadow arrives in cloudTargetB.a already evaluated at this pixel's terrain hit point.)
-    float beamMaxRangeM; // C12 follow-up #6 — settings-tunable Reflect-Orbital beam render range
-    float beamSkyGlowGain; // C12 follow-up #18 — mirrors cloud_march.comp's own copy so the
-                        // ground-spot term below and the sky glow march share one brightness
-                        // control and read as one continuous effect.
-    float beamGlowBleedGain; // C12 follow-up #39 — moved here from cloud_march.comp's CloudMarchPC
-                        // (that file's near-field bleed/march was removed entirely); now drives
-                        // this shader's own beam sky-illumination wash instead.
-    float beamProximityGlow; // C12 follow-up #41 — CPU-computed [0,1] "how close is the observer
-                        // to any active beam's actual line" value (SatelliteSim::beamProximityGlow).
-                        // Replaces the directional azimuth-sector dome lookup the wash used in
-                        // #39/#40 — applied uniformly regardless of view direction.
-    float noTwinkle; // offset 164 — unused here (only star_point.vert reads it); MUST still be
-                     // declared — a push_constant block must be a byte-exact CONTIGUOUS prefix of
-                     // the pushed struct, not a sparse one. Omitting this field entirely (as an
-                     // earlier version of this file did) silently shifted mwSuppressEased below to
-                     // offset 164 in THIS shader's own layout while the CPU still wrote it at 168,
-                     // so the value actually read here was noTwinkle's (always 0.0 for this draw)
-                     // instead — the Milky Way's pollution suppression was permanently a no-op.
-    float mwSuppressEased; // offset 168 — Milky Way's OWN light-pollution suppression — deliberately NOT the
-                        // shared domeVal/kMWPollutionMaxDim shape stars/satellites use below, so
-                        // tuning lightPollutionGain for those never requires retuning this. Its
-                        // threshold curve and asymmetric fade-in/fade-out hysteresis (moving from
-                        // a bright area into a dark one, or into space, fades the Milky Way back
-                        // in gradually rather than popping instantly) are entirely CPU-side — see
-                        // SatelliteSim.h's mwSuppressEased member and updateLightPollutionDome().
-                        // [0,1], 0 = fully visible, 1 = fully suppressed.
 } pc;
-
-// ── Perf knockout toggles (profiling-only) ──────────────────────────────────────
-// Lets the Display settings tab measure the isolated GPU cost of individual blocks of
-// this shader via gpuMsSmoothed deltas (App::drawFrame's timestamp query), without a GPU
-// capture tool. Default (mask 0) is bit-identical to normal rendering — every dbgSkip*()
-// call compiles to a single AND+compare against a value that's 0 unless a checkbox is on.
-bool dbgSkipTerrain()    { return (pc.debugDisableMask & 1u) != 0u; }
-bool dbgSkipAtmosphere() { return (pc.debugDisableMask & 2u) != 0u; }
-bool dbgSkipSunOD()      { return (pc.debugDisableMask & 4u) != 0u; }
-bool dbgSkipOceanRefl()  { return (pc.debugDisableMask & 8u) != 0u; }
 
 layout(location = 0) in  vec3 enuDir;           // interpolated ENU view ray (not normalised)
 layout(location = 1) in flat vec4 sunDirENU;    // passed through from vertex (same as pc.sunDirENU)
@@ -133,7 +89,7 @@ layout(std430, set = 0, binding = 17) readonly buffer ReflectBeamsBuf {
 };
 
 // Ground-beam compaction (perf follow-up): CPU-built every frame from a fresh readback of
-// ReflectBeamsBuf above, filtered to just the entries within pc.beamMaxRangeM of the observer —
+// ReflectBeamsBuf above, filtered to just the entries within cloud.beamMaxRangeM of the observer —
 // the exact test the ground-spot loop below used to redo, unconditionally, against the FULL raw
 // list (up to BEAM_MAX_ACTIVE=2048 entries) for every ground-hit pixel. Consuming this instead
 // bounds that loop's trip count to however many beams are actually close enough to matter, capped
@@ -175,6 +131,17 @@ layout(set = 0, binding = 8) uniform sampler3D cloudNoiseTex;
 // hand-copied here; see cloud_params.glsl for why that was a standing hazard.
 #define CLOUD_PARAMS_BINDING 9
 #include "cloud_params.glsl"
+
+// ── Perf knockout toggles (profiling-only) ──────────────────────────────────────
+// Lets the Display settings tab measure the isolated GPU cost of individual blocks of this shader
+// via gpuMsSmoothed deltas (App::drawFrame's timestamp query), without a GPU capture tool. Default
+// (mask 0) is bit-identical to normal rendering. The mask moved from the push constant into the
+// CloudParams UBO (cloud.dbgDisableMask) so this shader's push-constant range fits 128 bytes —
+// hence these helpers sit after the #include above, where `cloud` is in scope.
+bool dbgSkipTerrain()    { return (cloud.dbgDisableMask & 1u) != 0u; }
+bool dbgSkipAtmosphere() { return (cloud.dbgDisableMask & 2u) != 0u; }
+bool dbgSkipSunOD()      { return (cloud.dbgDisableMask & 4u) != 0u; }
+bool dbgSkipOceanRefl()  { return (cloud.dbgDisableMask & 8u) != 0u; }
 
 // Half-resolution cloud march output (written by cloud_march.comp, see the "velvet-rolling-
 // squirrel" plan / TERRAIN_PLAN.md session 23 log). Replaces the old inline cirrusMarch()/
@@ -1510,7 +1477,7 @@ void main() {
     // composite (`color = color * cloudB.rgb + cloudA.rgb`) still applies later, after the
     // 2D flat cloud-layer overlay and satellite glow so those get attenuated too; this early
     // sample only reads the alpha channels needed for occlusion tests.
-    vec2  cloudUV        = gl_FragCoord.xy / pc.screenSizePx;
+    vec2  cloudUV        = gl_FragCoord.xy / vec2(cloud.skyScreenW, cloud.skyScreenH);
     vec4  cloudACenter   = texture(cloudTargetA, cloudUV);
     vec4  cloudBCenter   = texture(cloudTargetB, cloudUV);
     // 3x3 box-blurred over cloudTargetA/B's own half-res texels — same idiom as the
@@ -1776,7 +1743,7 @@ void main() {
     // version read as a narrow rising pillar from one bearing (right for a city's broad glow dome,
     // wrong for one concentrated, often low-angle beam) and measured distance to the beam's GROUND
     // TARGET only, incorrectly fading out as the observer climbed up alongside a beam away from the
-    // ground while staying right next to its actual line. pc.beamProximityGlow (CPU-computed in
+    // ground while staying right next to its actual line. cloud.beamProximityGlow (CPU-computed in
     // SatelliteSim.cpp from true point-to-segment distance to the nearest active beam's line,
     // one-frame-stale like every other reflectBeamsBuf readback) already carries the complete
     // [0,1] falloff — applied equally regardless of view direction, so standing near a beam
@@ -1789,7 +1756,7 @@ void main() {
     // Reuses the SAME nightFactor just computed for city glow above — an accepted first-pass
     // simplification (an active beam's target is always night-side by construction, but this
     // doesn't separately check the OBSERVER's own day/night).
-    color += vec3(1.0, 0.95, 0.9) * pc.beamProximityGlow * pc.beamGlowBleedGain * kBeamSkyGlowScale
+    color += vec3(1.0, 0.95, 0.9) * cloud.beamProximityGlow * cloud.beamGlowBleedGain * kBeamSkyGlowScale
            * nightFactor;
 
     // ── Airglow (C15) ─────────────────────────────────────────────────────────
@@ -1900,7 +1867,7 @@ void main() {
     // unmeasurable. Skipping just leaves `color` without the glow term, which is exactly what an
     // all-empty glowBuf already produces.
 #ifndef SKY_LITE   // Planetarium-tier variant: drop the 64-iteration satellite sky-glow loop
-    if ((pc.debugDisableMask & 65536u) == 0u) {
+    if ((cloud.dbgDisableMask & 65536u) == 0u) {
         const float TWO_PI = 6.28318530718;
         vec3  flareAttn = exp(-(BETA_R * odR_cam + BETA_M * 1.1 * odM_cam));
         const float kSig = 0.90;
@@ -2509,17 +2476,17 @@ void main() {
         // see, just a lit patch of ground).
         // (Kept in SKY_LITE — the ground-spot loop is bounded by groundBeamCount and measured
         // cheap; beams are a wanted feature and run fine at the Planetarium tier.)
-        if ((pc.debugDisableMask & 128u) == 0u) {
+        if ((cloud.dbgDisableMask & 128u) == 0u) {
             const float kBeamGroundScale = 4e-8;
             // Normalized against the slider's default (0.05, see SatelliteSim.h) so existing
             // footprint brightness is unchanged at default gain, while still scaling together
             // with cloud_march.comp's sky glow (C12 follow-up #18) — one shared control instead
             // of two independently-tuned pieces, so raising/lowering it visually reads as one
             // continuous beam rather than a mismatched ground patch under an unrelated sky ray.
-            float skyGlowNorm = pc.beamSkyGlowGain / 0.05;
+            float skyGlowNorm = cloud.beamSkyGlowGain / 0.05;
             // Site-referenced (C12 follow-up #5): beams are now written unconditionally by any
             // satellite above the OBSERVER's own orbital horizon, not gated by the ground
-            // target's local horizon — so pc.beamMaxRangeM (settings-tunable, follow-up #6) is
+            // target's local horizon — so cloud.beamMaxRangeM (settings-tunable, follow-up #6) is
             // the render-time "is the observer close enough to this site" cutoff. Perf follow-up:
             // that cutoff is now applied ONCE, CPU-side, when GroundBeamsBuf is built each frame
             // (see its declaration above) rather than redone here per ground-hit pixel against
@@ -2629,7 +2596,7 @@ void main() {
     // framebuffer (recordPrePass) while cloudTargetA/B stay sized off the TRUE swap extent
     // (cloud_march.comp's own dispatch is unaffected by renderScale). Dividing by the wrong,
     // larger denominator compressed cloudUV into a shrinking corner of [0,1] as renderScale
-    // dropped — reported as clouds drifting off-center and distorting. pc.screenSizePx is always
+    // dropped — reported as clouds drifting off-center and distorting. the sky render-target size (cloud.skyScreenW/H) is always
     // this draw's OWN actual target size, so this now maps to [0,1] correctly regardless of scale.
     // cloudUV/cloudA/cloudB/tCloudOcclude were sampled earlier (right after tSurface), so the
     // moon disc above can be occluded by opaque cloud too — not resampled here.
@@ -2678,9 +2645,9 @@ void main() {
         float atmFracSky = 1.0 - clamp((obsEffH - kMWSpaceFadeStartM)
                                         / (kMWSpaceFadeEndM - kMWSpaceFadeStartM), 0.0, 1.0);
         float nightFactorSky = clamp(-sunDirENU.w * 5.0, 0.0, 1.0);
-        // pc.skyGlareVisibility (CPU-eased sun-glare gate, see its push-constant comment) replaces
+        // cloud.skyGlareVisibility (CPU-eased sun-glare gate) replaces
         // the old flat 1.0 space target — matches the same replacement in CPU's updateStars().
-        float nightFactorEffSky = mix(pc.skyGlareVisibility, nightFactorSky, atmFracSky);
+        float nightFactorEffSky = mix(cloud.skyGlareVisibility, nightFactorSky, atmFracSky);
 
         // Moonlight suppression — same shape as CPU's moonBrightStar.
         float tm = clamp(moonDirENU.z / 0.5, 0.0, 1.0);
@@ -2703,13 +2670,13 @@ void main() {
         // Milky Way-specific pollution response (replaces the old shared domeVal/kMWPollutionMaxDim
         // linear dim, which started dimming the Milky Way the instant ANY light pollution was
         // present and never fully hid it — 0.99 max dim still lets 1% through). The Milky Way
-        // should read as invisible until skies are genuinely dark, and pc.mwSuppressEased is a
+        // should read as invisible until skies are genuinely dark, and cloud.mwSuppressEased is a
         // CPU-side value already hysteresis-eased over mwPollutionThresholdLo/Hi (SatelliteSim.h,
         // see updateLightPollutionDome()) — a single non-directional "is it dark enough here" gate,
         // deliberately not per-pixel like domeVal/beamDomeVal: the Milky Way is a large diffuse
         // feature, not something whose suppression should pop differently by look direction the
         // way a single city's horizon glow does.
-        float mwPollutionSuppress = pc.mwSuppressEased;
+        float mwPollutionSuppress = cloud.mwSuppressEased;
 
         // C12 follow-up #31: same suppression shape, second independent source — a nearby
         // Reflect-Orbital beam should wash out the Milky Way the same way real light pollution

@@ -283,16 +283,23 @@ struct SatFlarePC
 }; // total: 128 bytes
 static_assert(sizeof(SatFlarePC) == 128, "SatFlarePC layout mismatch");
 
-// Draw push constants (passed to sat_point.vert and both sky shaders).
+// Sky-background draw push constants (sat_sky.vert + sat_sky.frag / _lite / _minimal, via
+// skyBgPipeLayout). Exactly 128 bytes — the Vulkan-guaranteed maxPushConstantsSize floor, which
+// the oldest AMD integrated parts sit right at. Everything that used to trail past offset 128 here
+// (debugDisableMask, screenSizePx, skyGlareVisibility, the four beam knobs, mwSuppressEased) was
+// per-frame-uniform, so it moved into the CloudParams frame UBO (cloud_params.glsl / GpuCloudParams
+// — sat_sky.frag already binds it) rather than a push constant. See the "Push-constant relief"
+// block at the end of GpuCloudParams. The two per-draw flags that lived here (noTwinkle,
+// manualTerrainTest) were only ever read by the point shaders, which now carry PointDrawPC below.
 // GLSL std430 layout:
 //   skyView    (mat4):  offset 0
 //   fovYRad    (float): offset 64
 //   aspect     (float): offset 68
 //   gmst       (float): offset 72  — Greenwich Mean Sidereal Time (radians)
-//   waveTime   (float): offset 76  — wall-clock seconds (glfwGetTime); constant speed regardless of time warp
+//   waveTime   (float): offset 76  — sim seconds; scales with time warp, pauses when paused
 //   sunDirENU  (vec4):  offset 80   xyz=direction, w=sin(elevation)
 //   moonDirENU (vec4):  offset 96   xyz=moon dir in ENU, w=illuminated fraction
-//   obsECEFDir (vec4):  offset 112  xyz=observer ECEF unit vector (for ENU→ECEF→lat/lon), w=unused
+//   obsECEFDir (vec4):  offset 112  xyz=observer ECEF unit vector, w=obsHeightOffset (m)
 //   total: 128 bytes
 struct SatDrawPC
 {
@@ -300,7 +307,7 @@ struct SatDrawPC
     float fovYRad;             // vertical field of view (radians)
     float aspect;              // viewport width / height
     float gmst;                // Greenwich Mean Sidereal Time (radians)
-    float waveTime;            // wall-clock seconds for wave animation (glfwGetTime)
+    float waveTime;            // sim seconds for wave animation
     glm::vec4 sunDirENU;       // sun direction in ENU (xyz unit vec, w = sin(elevation))
     glm::vec4 moonDirENU;      // moon direction in ENU (xyz unit vec, w = illuminated fraction)
     glm::vec4 obsECEFDir;      // xyz = observer ECEF unit vector (lets sat_sky.frag convert ENU hit →
@@ -308,83 +315,56 @@ struct SatDrawPC
                                // user altitude offset above terrain — maxed with the GPU's own
                                // ground-height lookup as obsEffH). Despite the field's original "w
                                // unused" comment (stale — corrected here), it IS read.
-    uint32_t debugDisableMask; // profiling-only knockout toggles consumed by sat_sky.frag
-                               // (dbgSkipTerrain/dbgSkipAtmosphere/dbgSkipSunOD/dbgSkipOceanRefl);
-                               // 0 = everything enabled (normal rendering). See Display settings tab.
-    float pad0;                // explicit — GLSL push_constant layout aligns the vec2 below to 8
-                               // bytes (std430 rules), same as std140/std430 buffers; C++ doesn't
-                               // insert this padding automatically the way GLSL requires it, so it
-                               // must be here explicitly or screenSizePx reads garbage in the shader.
-    glm::vec2 screenSizePx;    // CURRENT render target's pixel dimensions (session 29, resolution
-                               // scaling) — skyLowResExtent when recordPrePass renders the scaled
-                               // background, ctx.swapExtent everywhere else (full-res draws, and
-                               // Pass 1 at renderScale==1.0). Needed because gl_FragCoord.xy is
-                               // relative to whatever framebuffer THIS draw call targets, not
-                               // always the full swapchain — any shader code deriving a [0,1] UV
-                               // from gl_FragCoord (e.g. sampling the half-res cloud composite
-                               // targets, which are ALWAYS sized off the true swap extent
-                               // regardless of renderScale) must divide by this, not by an assumed
-                               // full-res constant, or the result is wrong whenever the two differ.
-    float skyGlareVisibility;  // offset 144 — eased sun-glare gate (recordCompute(), see
-                               // skyGlareEased member comment); used only by sat_sky.frag's Milky
-                               // Way (stars read the CPU-side skyGlareEased directly in
-                               // updateStars(), no GPU copy needed for them).
-    // (cloudShadowRangeM at 148 and cloudShadowResidualM at 152 lived here — both existed only to
-    //  map hitPt.xy into cloud_shadow.comp's observer-centred grid, and to undo that grid's
-    //  texel-snapping. The grid is gone; the shadow now arrives in cloudTargetB.a, already
-    //  evaluated at this pixel's own terrain hit point. Every field below shifted down 12 bytes.)
-    float beamMaxRangeM;     // offset 148 — C12 follow-up #6: settings-tunable "how far around
-                             // the observer do Reflect-Orbital beams render" cutoff, mirrors
-                             // CloudMarchPC's own copy (same frame's value).
-    float beamSkyGlowGain;   // offset 152 — C12 follow-up #18: mirrors CloudMarchPC's own copy so
-                             // the ground-spot term (this shader) and the sky glow march
-                             // (cloud_march.comp) share one brightness control and read as one
-                             // continuous effect instead of two independently-tuned pieces.
-    float beamGlowBleedGain; // offset 156 — C12 follow-up #39: moved here from CloudMarchPC — the
-                             // near-field volumetric march/bleed in cloud_march.comp was removed
-                             // entirely (didn't read as intended even after tuning, added real
-                             // cost for no visible benefit); this same slider now drives the
-                             // beam-driven sky-illumination wash added to this shader instead (see
-                             // the beamGlowDome consumption near the city-glow composite).
-    float beamProximityGlow; // offset 160 — C12 follow-up #41: CPU-computed [0,1] "how close is
-                             // the observer to any active beam's actual line" value (see
-                             // SatelliteSim::beamProximityGlow). Replaces the directional
-                             // azimuth-sector dome lookup the wash used in #39/#40 — applied
-                             // uniformly regardless of view direction.
-    float noTwinkle;         // offset 164 — S3/planets follow-up (RELEASE_v1_1_PLAN.md, session 30):
-                             // 0 (default) = normal star_point.vert twinkle/scintillation; 1 = gate
-                             // it off. Set only on the planet draw call's own copy of this PC —
-                             // real planets are small resolved discs and don't atmospheric-
-                             // scintillate the way point-source stars do. Only star_point.vert
-                             // reads this; every other consumer of SatDrawPC can ignore it (a GLSL
-                             // push_constant declaration only needs to be a PREFIX of the pushed
-                             // bytes, so shaders that don't declare it are unaffected).
-    // Milky Way's own light-pollution suppression — deliberately NOT the shared
-    // domeVal/kMWPollutionMaxDim shape sat_flare.comp/updateStars() use for stars/satellites, so
-    // tuning lightPollutionGain for those doesn't also require retuning the Milky Way. The
-    // threshold curve (mwPollutionThresholdLo/Hi) and fade-in/out hysteresis are entirely
-    // CPU-side (recordCompute(), updateLightPollutionDome()) — this is just the final eased
-    // result, [0,1], 0 = fully visible, 1 = fully suppressed. See mwSuppressEased member comment
-    // (SatelliteSim.h) and sat_sky.frag's Milky Way section for how it's consumed.
-    float mwSuppressEased;   // offset 168
-    float manualTerrainTest; // offset 172 — long-exposure trail follow-up: 0 (default) = normal
-                             // live draw, which already gets terrain occlusion for free from the
-                             // main render pass's hardware depth test; 1 = do a manual sceneDepthTex
-                             // hit-test instead (set only on the trail draw's own copy of this PC,
-                             // in recordCompute()'s trail block) — the trail's offscreen render pass
-                             // has no depth attachment of its own to piggyback on, same reason
-                             // flare_source.frag already needed this exact technique. Only
-                             // sat_point.frag/star_point.frag read this; every other consumer of
-                             // SatDrawPC can ignore it (same "a push_constant declaration only needs
-                             // to be a PREFIX" note as noTwinkle above).
-}; // total: 176 bytes
-static_assert(sizeof(SatDrawPC) == 176, "SatDrawPC layout mismatch");
+}; // total: 128 bytes
+static_assert(sizeof(SatDrawPC) == 128, "SatDrawPC layout mismatch");
+
+// Point-sprite draw push constants — satellites (sat_point.vert/.frag via drawPipeLayout) AND
+// stars/planets (star_point.vert/.frag via starPipeLayout). A separate, smaller struct from
+// SatDrawPC so both point pipeline layouts declare a push-constant range that fits the 128-byte
+// floor while still carrying the two per-draw flags (noTwinkle, manualTerrainTest) that genuinely
+// cannot go in the frame UBO — they differ between the star draw and the planet draw, and between
+// the live draw and the long-exposure trail draw, all within one frame. Each point shader declares
+// only the prefix it reads (a push_constant block only has to be a contiguous PREFIX of the pushed
+// bytes). GLSL std430 layout:
+//   skyView    (mat4):  offset 0    — both verts
+//   fovYRad    (float): offset 64   — both verts
+//   aspect     (float): offset 68   — both verts
+//   waveTime   (float): offset 72   — star_point.vert (twinkle phase)
+//   noTwinkle  (float): offset 76   — star_point.vert; 1 on the planet draw only
+//   moonDirENU (vec4):  offset 80   — star_point.vert (moon-disc star cull)
+//   obsECEFDir (vec4):  offset 96   — star_point.vert (w = obsHeightOffset for atmFrac)
+//   screenSizePx (vec2): offset 112 — sat_point.frag / star_point.frag (cloud/depth UV; always
+//                                     ctx.swapExtent — point draws never render at renderScale<1)
+//   debugDisableMask (uint): offset 120 — sat_point.frag (knockout bit 4096 only)
+//   manualTerrainTest (float): offset 124 — both frags; 1 on the trail draw only
+//   total: 128 bytes
+struct PointDrawPC
+{
+    glm::mat4 skyView;
+    float fovYRad;
+    float aspect;
+    float waveTime;
+    float noTwinkle;
+    glm::vec4 moonDirENU;
+    glm::vec4 obsECEFDir;
+    glm::vec2 screenSizePx;
+    uint32_t debugDisableMask;
+    float manualTerrainTest;
+}; // total: 128 bytes
+static_assert(sizeof(PointDrawPC) == 128, "PointDrawPC layout mismatch");
 
 // ── Push constants for cloud_march.comp (half-res cloud compute pass, C15-perf) ──────────────
 // Matches the layout(push_constant) block in cloud_march.comp exactly. A separate struct from
 // SatDrawPC (own pipeline layout, own push-constant range) — carries only the fields the moved
 // cloudMarch/cirrusMarch bodies actually use, plus obsEffH (CPU-computed; the compute shader has
 // no elevation-texture lookup of its own, see recordCompute()).
+//
+// Exactly 128 bytes — the 128-byte maxPushConstantsSize floor (see SatDrawPC). The five tail
+// fields that used to sit past offset 128 (debugDisableMask, beamMaxRangeM, showBeamDebugRays,
+// beamSkyGlowGain, cloudShadowRangeM) are all per-frame-uniform and moved into the CloudParams
+// UBO this shader already binds — see the "Push-constant relief" block at the end of
+// GpuCloudParams. cloud_march.comp reads them as cloud.dbgDisableMask / cloud.beamMaxRangeM /
+// cloud.showBeamDebugRays / cloud.beamSkyGlowGain / cloud.cloudShadowRangeM.
 struct CloudMarchPC
 {
     glm::mat4 skyView;
@@ -395,42 +375,8 @@ struct CloudMarchPC
     glm::vec4 sunDirENU;
     glm::vec4 moonDirENU;
     glm::vec4 obsECEFDir;
-    uint32_t debugDisableMask;  // perf knockout toggles — see SatDrawPC's member comment. Needed
-                                // here too now that the aurora sky curtain march moved into
-                                // cloud_march.comp; mirrors the same debugDisableMask value.
-    float beamMaxRangeM;        // offset 132 — C12 follow-up #6: settings-tunable "how far around
-                                // the observer do Reflect-Orbital beams render" cutoff, mirrors
-                                // SatDrawPC's own copy (same frame's value).
-    uint32_t showBeamDebugRays; // offset 136 — C12 follow-up #12: debug-only "draw each active
-                                // mirror's actual current pointing direction as a long ray" toggle.
-                                // Deliberately NOT part of debugDisableMask — that mask means
-                                // "disable this normally-on thing" (0 = normal rendering); this is
-                                // the opposite shape ("enable this normally-off extra"), so it gets
-                                // its own field rather than overloading that convention.
-    float beamSkyGlowGain;      // offset 140 — C12 follow-up #17: settings-tunable brightness for
-                                // the beam->cloud illumination term (C12 follow-up #44 — this used
-                                // to gain the old analytic sky tube; it's that term's direct
-                                // successor, not a new concept, so it keeps the same slider, per
-                                // [[feedback_shared_gain_sliders]]).
-    float cloudShadowRangeM;    // offset 144 — distance (m) beyond which the per-pixel terrain
-                                // cloud shadow fades out and stops being marched. Restored (with a
-                                // new meaning) after the 128x128 grid was deleted: that grid had a
-                                // hard extent which accidentally kept its cost near zero from
-                                // altitude, and dropping it made the per-pixel replacement run over
-                                // the whole screen from orbit. Now a smooth fade rather than a hard
-                                // edge — see the call site in cloud_march.comp's main().
-    // (daySuppression/beamExtinctionMult/beamNearFieldFadeM lived here, at offsets 148/152/156 —
-    //  all three existed only for the analytic beam sky-glow block deleted in C12 follow-up #44.
-    //  The new per-sample beam-cloud term gates day/night with the march's own per-sample
-    //  sampleDayness instead (no CPU-fed ratio needed), and has no separate extinction/near-
-    //  field-fade concept — it's a real volumetric term composited through the march's own
-    //  transmittance, not a closed-form stand-in that needed its own fade heuristics. The CPU
-    //  members themselves (daySuppression, beamNearFieldFadeM) are NOT removed — still read
-    //  elsewhere (satellite/star day suppression, SatDrawPC's ground-spot-adjacent crossfade
-    //  radius) — only their now-unused mirror copies in this one struct are gone.
-    //  beamGlowBleedGain, before that, had already moved to SatDrawPC in follow-up #39.)
-}; // total: 148 bytes.
-static_assert(sizeof(CloudMarchPC) == 148, "CloudMarchPC layout mismatch");
+}; // total: 128 bytes.
+static_assert(sizeof(CloudMarchPC) == 128, "CloudMarchPC layout mismatch");
 
 // ── Reflect-Orbital beam->cloud light sources (host-visible) ─────────────────────────────────
 // 2026-08-09, fourth design for this feature. First was a per-target CPU aggregation anchored at
@@ -1172,10 +1118,32 @@ struct GpuCloudParams
     // Airglow coverage + polar boost, 480 -> 496. See cloud_params.glsl for the full design.
     float airglowCoverageGain; // 0 = uniform shimmer (old behaviour), 1 = full patchy coverage
     float airglowPolarGain;    // RED band only: extra boost ramping toward the geomagnetic pole
+    // ── Push-constant relief (496 -> 544) ────────────────────────────────────────────────────
+    // These were push-constant fields on SatDrawPC / CloudMarchPC until both structs had to fit
+    // the 128-byte maxPushConstantsSize floor (oldest AMD integrated GPUs). All are per-frame-
+    // uniform (one value for the whole frame, not per-draw), which is exactly what a frame UBO is
+    // for. Consumers: sat_sky.frag (all of them) and cloud_march.comp (dbgDisableMask,
+    // showBeamDebugRays, beamMaxRangeM, beamSkyGlowGain, cloudShadowRangeM). Filled in
+    // recordCompute()'s CloudParams block; MUST match cloud_params.glsl field-for-field (run
+    // tools/check_cloud_params.py). Appended, not folded into pad21/pad22 — same rule as every
+    // prior growth here.
+    uint32_t dbgDisableMask;    // = debugDisableMask; profiling knockout bitmask
+    uint32_t showBeamDebugRays; // 0/1 — draw each mirror's live pointing ray (cloud_march.comp)
+    float skyGlareVisibility;   // eased sun-glare gate for sat_sky.frag's Milky Way
+    float beamMaxRangeM;        // Reflect-Orbital beam render-range cutoff (m)
+    float beamSkyGlowGain;      // beam->cloud illumination brightness (shared: sky frag + march)
+    float beamGlowBleedGain;    // beam-driven sky-illumination wash gain (sat_sky.frag)
+    float beamProximityGlow;    // CPU [0,1] observer-near-a-beam-line wash (sat_sky.frag)
+    float mwSuppressEased;      // Milky Way's own light-pollution suppression [0,1] (sat_sky.frag)
+    float cloudShadowRangeM;    // per-pixel terrain cloud-shadow fade distance (cloud_march.comp)
+    float skyScreenW;           // sat_sky.frag render-target width  (skyLowResExtent at renderScale<1,
+    float skyScreenH;           // else ctx.swapExtent) — for gl_FragCoord->UV; the point shaders
+                                // carry their own screenSizePx (always full-res) in PointDrawPC
     float pad21;
     float pad22;
+    float pad23;
 };
-static_assert(sizeof(GpuCloudParams) == 496, "GpuCloudParams layout mismatch");
+static_assert(sizeof(GpuCloudParams) == 544, "GpuCloudParams layout mismatch");
 
 // ── Push constants for sat_orbit.comp ────────────────────────────────────────
 // Offsets verified against the push_constant block in sat_orbit.comp.
@@ -1326,7 +1294,8 @@ public:
     void init(VulkanContext &ctx) override;
     void onResize(VulkanContext &ctx) override;
     void recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float dt) override;
-    SatDrawPC buildSatDrawPC(VulkanContext &ctx, VkExtent2D targetExtent); // shared by recordPrePass and recordDraw
+    SatDrawPC buildSkyDrawPC(VulkanContext &ctx);     // sky background (recordPrePass + recordDraw Pass 1)
+    PointDrawPC buildPointDrawPC(VulkanContext &ctx); // satellite / star / planet / trail point draws
     void recordPrePass(VkCommandBuffer cmd, VulkanContext &ctx, float dt, uint32_t imgIdx) override;
     VkRenderPass activeRenderPass(VulkanContext &ctx) override { return renderScale < 0.999f ? ctx.renderPassLoad : ctx.renderPass; }
     void recordDraw(VkCommandBuffer cmd, VulkanContext &ctx, float dt) override;

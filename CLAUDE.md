@@ -424,13 +424,37 @@ moonDirECI (vec3), pad1 (float)        — offset 112/124
 (binding 3 in the sat_flare.comp descriptor set, 8 floats, host-visible/mapped), which doesn't
 need push-constant space. See "Subsystem: Light Pollution Dome" below.
 
-**SatDrawPC** (112 bytes) — sat_point.vert + both sky shaders:
+**SatDrawPC** (128 bytes) — `sat_sky.vert`/`.frag` (+ `_lite`/`_minimal`) via `skyBgPipeLayout`:
 ```
 skyView (mat4)                          — offset 0
-fovYRad, aspect, pad[2]                 — offsets 64/68/72/76
+fovYRad, aspect, gmst, waveTime         — offsets 64/68/72/76
 sunDirENU (vec4) — xyz=dir, w=sin(el)  — offset 80
 moonDirENU (vec4) — xyz=dir, w=illum   — offset 96
+obsECEFDir (vec4) — xyz=ECEF, w=obsHeightOffset — offset 112
 ```
+Exactly the 128-byte `maxPushConstantsSize` floor (oldest AMD integrated parts). Everything that
+used to trail past offset 128 — `debugDisableMask`, `screenSizePx`, `skyGlareVisibility`, the four
+`beam*` scalars, `mwSuppressEased` — was per-frame-uniform and moved into the **CloudParams UBO**
+(`cloud_params.glsl` / `GpuCloudParams` "Push-constant relief" block): `sat_sky.frag` reads them as
+`cloud.dbgDisableMask` / `vec2(cloud.skyScreenW, cloud.skyScreenH)` / `cloud.skyGlareVisibility` /
+`cloud.beam*` / `cloud.mwSuppressEased`. `buildSkyDrawPC()` fills it.
+
+**PointDrawPC** (128 bytes) — `sat_point.vert`/`.frag` (`drawPipeLayout`) + `star_point.vert`/`.frag`
+(`starPipeLayout`, also planets/trail):
+```
+skyView (mat4)                          — offset 0
+fovYRad, aspect, waveTime, noTwinkle    — offsets 64/68/72/76
+moonDirENU (vec4)                       — offset 80
+obsECEFDir (vec4) — w=obsHeightOffset   — offset 96
+screenSizePx (vec2)                     — offset 112   (always ctx.swapExtent — point draws never scale)
+debugDisableMask (uint)                 — offset 120   (only sat_point.frag's knockout bit 4096)
+manualTerrainTest (float)               — offset 124   (1 on the trail draws only)
+```
+Split from `SatDrawPC` so both point pipeline layouts fit 128 bytes while still carrying the two
+per-draw flags that genuinely can't be frame-UBO'd: `noTwinkle`=1 on the planet draw, and
+`manualTerrainTest`=1 on the trail draws — both differ between draws within one frame.
+`buildPointDrawPC()` fills it; callers set the two flags. Each point shader declares only the
+prefix it reads.
 
 ---
 
@@ -1055,8 +1079,10 @@ right after the star draw. Reusing the pipeline object means `onResize()`'s exis
 `createStarPipeline()` recreation covers planets for free — no separate resize handling needed.
 One real shader difference was necessary: `star_point.vert`'s atmospheric scintillation/twinkle is
 physically wrong for planets (small resolved discs, not point sources) — gated behind a new
-`SatDrawPC.noTwinkle` field (offset 164, struct grown 164→168 bytes, same "append at the end"
-precedent as `debugDisableMask`), set to 1 only on the planet draw's own copy of the push constant.
+`noTwinkle` field, set to 1 only on the planet draw's own copy of the push constant. (Originally
+`SatDrawPC.noTwinkle` at offset 164; now `PointDrawPC.noTwinkle` at offset 76 after the
+128-byte push-constant split — see the **PointDrawPC** entry under "Subsystem: GPU Orbital
+Pipeline".)
 The pre-existing Moon-disc occlusion cull in the same shader stays active for planets unchanged
 (correct — a planet behind the Moon's disc should still be culled).
 
@@ -1157,8 +1183,10 @@ one bucket can be timed at several sites or inside a loop). `beginCpuFrameTiming
 resulting one-frame staleness deliberately matches `gpuMsRaw[]`'s, which is what lets a sweep step
 sample a CPU frame and a GPU frame from the same moment instead of one lagging the other.
 
-**Perf knockout toggles**: `debugDisableMask` (uint32, in both `SatDrawPC` and `CloudMarchPC` — see
-their own entries above) is a profiling-only bitmask. Checkboxes in Settings → Display →
+**Perf knockout toggles**: `debugDisableMask` (uint32) is a profiling-only bitmask. It rides in the
+CloudParams UBO as `cloud.dbgDisableMask` (read by `sat_sky.frag` and `cloud_march.comp`), plus a
+copy in `PointDrawPC` for `sat_point.frag`'s bit 4096 — all pushed from the single
+`SatelliteSim::debugDisableMask` member each frame. Checkboxes in Settings → Display →
 "KNOCKOUT PROFILING" (18 as of 2026-08-10, driven by the single `kDebugToggles` table at the top of
 `SatelliteSimUI.cpp` — bit, display label, and stable JSON key per row; adding a row there adds a
 checkbox AND a sweep step for free) each disable one shader block or dispatch — each with a mathematically-safe
@@ -1298,18 +1326,20 @@ targets, not always the full swapchain — a real bug shipped and was fixed same
 composite sample divided `gl_FragCoord.xy` by `textureSize(cloudTargetA,0)*2.0` (an assumed full-
 res constant, since `cloud_march.comp`'s own dispatch is unaffected by `renderScale`), which
 silently broke the moment the background could render into a smaller offscreen target — clouds
-drifted off-center, fully distorted at 50%. Fixed via a new `SatDrawPC` field, `screenSizePx`
-(THIS draw's actual target size — `skyLowResExtent` when pre-rendering scaled,
-`ctx.swapExtent` everywhere else) — any `[0,1]`-normalized UV derived from `gl_FragCoord` must
-divide by `pc.screenSizePx`, never an assumed constant. (A fixed-frequency noise seed like the
-terrain-march jitter lookup, `gl_FragCoord.xy * (1.0/128.0)`, is fine as-is — no total-resolution
-assumption baked in, not a normalized UV.)
+drifted off-center, fully distorted at 50%. The sky render-target size is now `cloud.skyScreenW`/
+`skyScreenH` in the CloudParams UBO (`skyLowResExtent` when the scaled prepass runs — recordPrePass
+and recordDraw's Pass 1 are mutually exclusive, so one per-frame value suffices — else
+`ctx.swapExtent`); any `[0,1]`-normalized UV in `sat_sky.frag` derived from `gl_FragCoord` divides
+by `vec2(cloud.skyScreenW, cloud.skyScreenH)`, never an assumed constant. (A fixed-frequency noise
+seed like the terrain-march jitter lookup, `gl_FragCoord.xy * (1.0/128.0)`, is fine as-is — no
+total-resolution assumption baked in, not a normalized UV.) The point shaders (`sat_point.frag`/
+`star_point.frag`) never render scaled, so they keep a plain `screenSizePx` (= `ctx.swapExtent`) in
+`PointDrawPC`.
 
-`SatDrawPC` grew 132→144 bytes for `screenSizePx` — needed an explicit `pad0` float first, since
-GLSL's `push_constant` block requires 8-byte alignment for a `vec2` that C++ doesn't insert
-automatically. `buildSatDrawPC(ctx, targetExtent)` factors out the shared push-constant fill
-between `recordPrePass` and `recordDraw` so `aspect` (always the true screen aspect) and
-`screenSizePx` (always this draw's real target) can't drift apart between the two call sites.
+`screenSizePx` originally lived in `SatDrawPC` (which grew 132→144 for it); it moved to the
+CloudParams UBO / `PointDrawPC` in the 128-byte push-constant split. `buildSkyDrawPC(ctx)` /
+`buildPointDrawPC(ctx)` fill the two draw push constants; the CloudParams UBO fill in
+`recordCompute()` sets `skyScreenW`/`H` from `renderScale`.
 
 See `TERRAIN_PLAN.md` session 29 log for the full design writeup and the bug's root-cause
 narrative.
@@ -1369,6 +1399,18 @@ those presets force `renderScale = 1.0`, so the prepass never runs for them.
   centre tap reuses the already-sampled `cloudBCenter.a`): −17 texture samples on every ground-hit
   pixel, the largest sample-count cut in the file. If ocean graininess returns, strengthen
   `cloudGroundShadow`'s dither in `cloud_march.comp` rather than widening this back out.
+- **Push constants trimmed to the 128-byte `maxPushConstantsSize` floor** (2026-09-07). The same
+  old AMD integrated parts that need Potato/Planetarium also report exactly the Vulkan-guaranteed
+  minimum `maxPushConstantsSize` of 128, and `SatDrawPC` (176) / `CloudMarchPC` (148) both blew
+  past it — the app could not create those pipeline layouts at all. `SatDrawPC` split into a
+  128-byte sky core + a new 128-byte `PointDrawPC` for the point pipelines; `CloudMarchPC` trimmed
+  to 128. Every per-frame-uniform tail field (`debugDisableMask`, `screenSizePx`,
+  `skyGlareVisibility`, the `beam*` scalars, `mwSuppressEased`, `showBeamDebugRays`,
+  `cloudShadowRangeM`) moved into the CloudParams frame UBO — see the **SatDrawPC** / **PointDrawPC**
+  entries under "Subsystem: GPU Orbital Pipeline → Push constants" and the "Push-constant relief"
+  block in `GpuCloudParams`. **Consequence for future work:** `SatOrbitPC` and `SatFlarePC` are
+  already at exactly 128 — any new push-constant field on any of these structs must go in a UBO,
+  not the push constant. Prefer the CloudParams UBO where the consumer already binds it.
 
 ---
 
@@ -1579,10 +1621,12 @@ Read it at the start of any terrain-related session before making changes.
   were the real dominant costs. See `TERRAIN_PLAN.md` session 24 log for the original follow-up,
   session 29 log for the profiling toolkit and the corrected picture, and "Subsystem: GPU
   Performance Profiling" below for how to re-run this kind of investigation.
-- `SatDrawPC` is 132 bytes: `obsECEFDir (vec4)` at offset 112 (xyz = observer ECEF unit vector,
-  w = obsHeightOffset), `debugDisableMask (uint)` at offset 128 (perf knockout toggles, session 29
-  — see "Subsystem: GPU Performance Profiling"). `CloudMarchPC` is also 132 bytes for the same
-  reason (mirrors `debugDisableMask` — only the aurora/airglow-red bits are meaningful there).
+- `SatDrawPC`, `PointDrawPC` and `CloudMarchPC` are all exactly **128 bytes** — the
+  `maxPushConstantsSize` floor. `debugDisableMask` and the other per-frame tail fields ride in the
+  CloudParams UBO now (`cloud.dbgDisableMask` etc.); see the **SatDrawPC** / **PointDrawPC** entries
+  under "Subsystem: GPU Orbital Pipeline → Push constants" and the "Push-constant relief" block in
+  `GpuCloudParams`. Both point pipeline layouts (`drawPipeLayout`, `starPipeLayout`) use
+  `sizeof(PointDrawPC)`; `skyBgPipeLayout` uses `sizeof(SatDrawPC)`.
 - Sky descriptor set has 22 bindings (0-21): GlowBuf, noise, moon, earthDay, earthNight, earthElev, earthSpec, earthClouds, cloudNoiseTex (sampler3D), CloudParams UBO, half-res cloud march targets A/B, lightDomeBuf, milkyWayTex, cityDayDetail, cityNightDetail, auroraNoiseTex (sampler3D), reflectBeamsBuf, beamGlowDomeBuf, sceneDepthTex, oceanGlintBuf, groundBeamsBuf. Binding 18 was `cloudShadowTex` until that pass was deleted; 19/20 were compacted down into 18/19 rather than leaving a hole, since the C++ side fills its binding array contiguously. groundBeamsBuf (21, perf follow-up) is the CPU-compacted, observer-range-culled subset of reflectBeamsBuf that sat_sky.frag's ground-spot loop reads instead of the raw (up to 2048-entry) buffer — see GpuGroundBeams in SatelliteSim.h. **As of 2026-08-10 its entries are `GpuGroundBeam` (32 bytes), not raw `GpuReflectBeam`** — a pre-solved record, see "Beam ground-spot CPU hoist" below
 - GPU-side observer ground height lookup added; CPU observer height also corrected (see elevation encoding below)
 - `sat_sky.frag` ground path: terrain march step count is path-length-adaptive as of session 29

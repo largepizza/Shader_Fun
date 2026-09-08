@@ -300,6 +300,24 @@ layout(set = 0, binding = CLOUD_PARAMS_BINDING) uniform CloudParams {
     // patchiness (see airglowCoverageGain above).
     float airglowCoverageGain;
     float airglowPolarGain;
+    // ── Push-constant relief (496 -> 544) ────────────────────────────────────────────────────
+    // Ex-push-constant fields from SatDrawPC / CloudMarchPC, moved here so both push-constant
+    // ranges fit the 128-byte maxPushConstantsSize floor (oldest AMD integrated GPUs). All are
+    // per-frame-uniform. Mirror of GpuCloudParams in SatelliteSim.h — keep field-for-field
+    // (tools/check_cloud_params.py). sat_sky.frag reads all of these; cloud_march.comp reads
+    // dbgDisableMask / showBeamDebugRays / beamMaxRangeM / beamSkyGlowGain / cloudShadowRangeM.
+    uint  dbgDisableMask;    // profiling knockout bitmask (was pc.debugDisableMask)
+    uint  showBeamDebugRays; // 0/1 — draw each mirror's live pointing ray
+    float skyGlareVisibility;
+    float beamMaxRangeM;
+    float beamSkyGlowGain;
+    float beamGlowBleedGain;
+    float beamProximityGlow;
+    float mwSuppressEased;
+    float cloudShadowRangeM;
+    float skyScreenW;        // sat_sky.frag render-target size (low-res prepass or full-res); any
+    float skyScreenH;        // gl_FragCoord-derived [0,1] UV in that shader divides by this
     float pad21;
     float pad22;
+    float pad23;
 } cloud;

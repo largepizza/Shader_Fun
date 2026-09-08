@@ -265,6 +265,29 @@ City-upwelling put back for SKY_LITE (sim read "hollow" at night without it) but
 
 SKY_LITE SPV 141 → 142 KB.
 
+### 2026-09-07 — push constants trimmed to the 128-byte floor (all-platform, `main`)
+Not a perf change — a hardware-compatibility fix, same 2015 AMD Mac / weak-hardware theme. That
+GPU's `maxPushConstantsSize` is exactly 128 (the Vulkan-guaranteed minimum), and `SatDrawPC` (176)
++ `CloudMarchPC` (148) both exceeded it, so their pipeline layouts couldn't be created.
+
+- `SatDrawPC` → 128-byte sky core (skyView / fov / aspect / gmst / waveTime / sun / moon / obsECEF),
+  used only by `skyBgPipeLayout`.
+- New `PointDrawPC` (128) for `drawPipeLayout` + `starPipeLayout` — carries the two genuinely
+  per-draw flags (`noTwinkle` on the planet draw, `manualTerrainTest` on the trail draws) plus a
+  full-res `screenSizePx` and a `debugDisableMask` copy for `sat_point.frag`'s bit 4096.
+- `CloudMarchPC` → 128 (mat4 + 4 float + 3 vec4).
+- Everything else that was trailing past offset 128 was per-frame-uniform and moved into the
+  **CloudParams UBO** (`GpuCloudParams` / `cloud_params.glsl` grew 496 → 544, "Push-constant
+  relief" block; `check_cloud_params.py` green): `debugDisableMask`, `skyGlareVisibility`,
+  `beamMaxRangeM`, `beamSkyGlowGain`, `beamGlowBleedGain`, `beamProximityGlow`, `mwSuppressEased`,
+  `showBeamDebugRays`, `cloudShadowRangeM`, and the sky render-target size as `skyScreenW`/`skyScreenH`.
+- `buildSatDrawPC()` → `buildSkyDrawPC()` / `buildPointDrawPC()`.
+
+No new descriptor bindings, no new pipelines, no spec constants. Builds clean (incl. `-DSKY_LITE`),
+all `static_assert`s pass, user confirmed the app still runs on the Mac. `CLAUDE.md` updated
+(struct entries + "Weak-Hardware Sky Tiers → All-platform changes"). **Future:** `SatOrbitPC` /
+`SatFlarePC` sit at exactly 128 too — new push-constant fields on any of these go in a UBO.
+
 ### Next (options, in rough FPS/effort order)
 1. **Aurora surface glow (cut D)** — `auroraGlowAt` on terrain/ocean + the ocean aurora-reflection
    sample. `kBitAurora` already gates the curtain; this is the frag-side ambient. Low risk.
