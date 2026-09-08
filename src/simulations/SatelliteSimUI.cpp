@@ -1568,6 +1568,43 @@ void SatelliteSim::buildSettingsSoundTab(const UIInput &inp, UIRenderer &ui)
 // ─── buildSettingsControlsTab ───────────────────────────────────────────────
 void SatelliteSim::buildSettingsControlsTab(const UIInput &inp, UIRenderer &ui)
 {
+    // The floating quick-reference window (buildViewControlsWindow) used to auto-open on
+    // startup; user testing found almost nobody closed it, so demo footage was consistently
+    // full of it sitting in the top-left. It no longer opens itself — this button is the only
+    // way to bring it up now, and it lives here rather than on the HUD since a player reaching
+    // for a control reminder is already in Settings looking at the live rebind list below.
+    CLAY(CLAY_ID("OpenControlsWindowRow"), {.layout = {
+                                                .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32)},
+                                                .padding = {4, 4, 4, 4},
+                                                .childGap = 8,
+                                                .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                                .layoutDirection = CLAY_LEFT_TO_RIGHT}})
+    {
+        CLAY_TEXT(CLAY_STRING("Quick-reference overlay"),
+                  CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(13)}));
+        CLAY(CLAY_ID("OpenControlsWindowSpacer"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
+
+        Clay_Color btnBg = viewControlsChrome.open ? Pal::btnAccent : (hovOpenControlsWindow ? Pal::btnHover : Pal::btnIdle);
+        CLAY(CLAY_ID("OpenControlsWindowBtn"), {.layout = {
+                                                    .sizing = {CLAY_SIZING_FIXED(140), CLAY_SIZING_FIXED(24)},
+                                                    .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                .backgroundColor = btnBg,
+                                                .cornerRadius = CLAY_CORNER_RADIUS(3)})
+        {
+            bool n = Clay_Hovered();
+            sndRollover(n, hovOpenControlsWindow);
+            sndClick(n, inp.lmbPressed);
+            hovOpenControlsWindow = n;
+            if (n && inp.lmbPressed)
+                viewControlsChrome.open = !viewControlsChrome.open;
+            CLAY_TEXT(viewControlsChrome.open ? CLAY_STRING("Showing") : CLAY_STRING("Show window"),
+                      CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(11)}));
+        }
+    }
+    CLAY(CLAY_ID("ControlsTabDiv"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                                .padding = {0, 0, 4, 8}},
+                                     .backgroundColor = {40, 40, 44, 255}}) {}
+
     static char kbKeyBuf[KB_COUNT][16];
     static char kbPadBuf[KB_COUNT][16];
     for (int ki = 0; ki < (int)keybindings.size() && ki < KB_COUNT; ++ki)
@@ -2153,36 +2190,6 @@ void SatelliteSim::buildSettingsDisplayTab(const UIInput &inp, UIRenderer &ui)
                     settingsActiveTab = 4; // Display
             }
             CLAY_TEXT(showAdvancedSettings ? CLAY_STRING("On") : CLAY_STRING("Off"),
-                      CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(11)}));
-        }
-    }
-
-    // ── Show controls window on startup ────────────────────────────
-    CLAY(CLAY_ID("ShowControlsRow"), {.layout = {
-                                          .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28)},
-                                          .padding = {4, 4, 4, 4},
-                                          .childGap = 8,
-                                          .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                                          .layoutDirection = CLAY_LEFT_TO_RIGHT}})
-    {
-        CLAY_TEXT(CLAY_STRING("Show controls window on startup"),
-                  CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(13)}));
-        CLAY(CLAY_ID("ShowControlsSpacer"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
-
-        Clay_Color chkBg = showControlsOnStartup ? Pal::btnAccent : (hovShowControlsStartup ? Pal::btnHover : Pal::btnIdle);
-        CLAY(CLAY_ID("ShowControlsChk"), {.layout = {
-                                              .sizing = {CLAY_SIZING_FIXED(50), CLAY_SIZING_FIXED(22)},
-                                              .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
-                                          .backgroundColor = chkBg,
-                                          .cornerRadius = CLAY_CORNER_RADIUS(3)})
-        {
-            bool n = Clay_Hovered();
-            sndRollover(n, hovShowControlsStartup);
-            sndClick(n, inp.lmbPressed);
-            hovShowControlsStartup = n;
-            if (n && inp.lmbPressed)
-                showControlsOnStartup = !showControlsOnStartup;
-            CLAY_TEXT(showControlsOnStartup ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
                       CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(11)}));
         }
     }
@@ -3380,11 +3387,13 @@ void SatelliteSim::buildSettingsAttributionsTab(const UIInput &inp, UIRenderer &
 }
 
 // ─── buildViewControlsWindow ─────────────────────────────────────────────────
-// Quick-reference list of simulation controls. Shown by default on first run
-// (gated by showControlsOnStartup, applied once in init()); closable, but closing
-// only lasts for the current run — open state itself is not persisted. Uses the
-// same buildResizableWindow frame as the settings window (was a hand-rolled
-// near-duplicate before; now one window implementation).
+// Quick-reference list of simulation controls. No longer shown automatically on startup — it used
+// to (gated by a since-removed showControlsOnStartup setting), but user testing found almost nobody
+// closed it, so demo recordings consistently had it sitting in the top-left. Now closed by default
+// every launch and only opened via the "Show window" button in Settings > Controls
+// (buildSettingsControlsTab); closing it (or leaving it open) only lasts for the current run either
+// way — open state itself is not persisted. Uses the same buildResizableWindow frame as the
+// settings window (was a hand-rolled near-duplicate before; now one window implementation).
 void SatelliteSim::buildViewControlsWindow(const UIInput &inp, UIRenderer &ui)
 {
     buildResizableWindow(inp, ui, viewControlsChrome, 1, "Controls", true, hovViewControlsClose,
@@ -3579,14 +3588,21 @@ void SatelliteSim::buildIntroOverlay(const UIInput &inp, UIRenderer &ui)
                                                 .layoutDirection = CLAY_TOP_TO_BOTTOM},
                                             .floating = {.zIndex = 30, .attachTo = CLAY_ATTACH_TO_ROOT}})
         {
+            // No background panel here (deliberately — a translucent rounded rectangle used to sit
+            // behind this text; user testing found it read as UI clutter, especially since players
+            // rarely dismissed the intro quickly, so demo footage was full of it). A dedicated
+            // serif face was tried in its place (2026-09-08) but reverted the same day: the stbtt
+            // baked-bitmap atlas this renderer uses has no per-size re-rasterization (see
+            // UIRenderer::FontAtlas's bakedSize comment), and the serif face's hinting produced
+            // visibly misaligned glyphs at these large caption sizes (most obviously "2036"'s 3/6)
+            // once scaled up from the bake. Fixing that for real needs an SDF font atlas, not
+            // attempted here — regular UI font stays the only font for now.
             CLAY(CLAY_ID("IntroCaptionPanel"), {.layout = {
                                                     .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
                                                     .padding = {24, 24, 16, 16},
                                                     .childGap = 4,
                                                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER},
-                                                    .layoutDirection = CLAY_TOP_TO_BOTTOM},
-                                                .backgroundColor = {0, 0, 0, (float)((int)textA * 110 / 255)},
-                                                .cornerRadius = CLAY_CORNER_RADIUS(6)})
+                                                    .layoutDirection = CLAY_TOP_TO_BOTTOM}})
             {
                 if (isYearBeat)
                 {
@@ -3967,10 +3983,9 @@ void SatelliteSim::loadSettings()
         settingsActiveTab = std::clamp(d.value("active_tab", settingsActiveTab), 0, 11);
         int unitVal = d.value("unit_system", unitSystem == UnitSystem::Imperial ? 1 : 0);
         unitSystem = unitVal == 1 ? UnitSystem::Imperial : UnitSystem::Metric;
-        showControlsOnStartup = d.value("show_controls_on_startup", showControlsOnStartup);
-        // Feature preference, not a graphics-tuning value — unconditional like showControlsOnStartup
-        // above, not gated behind schemaMatches. trailClearPending stays true regardless (its own
-        // compiled-in default), so a trail-enabled load always starts from a blank buffer.
+        // Feature preference, not a graphics-tuning value — unconditional, not gated behind
+        // schemaMatches. trailClearPending stays true regardless (its own compiled-in default),
+        // so a trail-enabled load always starts from a blank buffer.
         trailEnabled = d.value("trail_enabled", trailEnabled);
         // UC3 follow-up: back to real persisted behavior now that the cinematic itself is settled
         // (the always-on-every-launch testing override is gone). "play_intro_on_startup" absent
@@ -4240,7 +4255,6 @@ void SatelliteSim::saveSettings()
         {"debug_disable_mask", debugDisableMask},
         {"active_tab", settingsActiveTab},
         {"unit_system", unitSystem == UnitSystem::Imperial ? 1 : 0},
-        {"show_controls_on_startup", showControlsOnStartup},
         {"play_intro_on_startup", playIntroOnStartup},
         {"trail_enabled", trailEnabled}};
     if (settingsChrome.x >= 0.0f)

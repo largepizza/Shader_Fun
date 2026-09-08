@@ -2777,7 +2777,7 @@ private:
     bool hovViewControlsClose = false;
     bool hovUnitMetric = false;
     bool hovUnitImperial = false;
-    bool hovShowControlsStartup = false;
+    bool hovOpenControlsWindow = false; // Controls tab's "Open Controls Reference" button
     bool hovTab[12] = {}; // one per settings-window tab (kSettingsTabNames)
     bool hovScaleMinus = false;
     bool hovScalePlus = false;
@@ -2840,7 +2840,6 @@ private:
     // ── Right HUD panel: altitude display mode + unit system ──────────────────
     bool altModeSeaLevel = true;                // true = MSL (sea level), false = AGL (above terrain)
     UnitSystem unitSystem = UnitSystem::Metric; // Display tab setting; affects altitude readout
-    bool showControlsOnStartup = true;          // Display tab setting; gates viewControlsChrome.open in init()
 
     // ── NEW-7: frame limiter ────────────────────────────────────────────────
     FpsCapMode fpsCapMode = FpsCapMode::VSync;  // Display tab setting; see FpsCapMode comment

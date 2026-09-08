@@ -357,11 +357,6 @@ void SatelliteSim::init(VulkanContext &ctx)
     destroySkyLowResResources(ctx.device);
     createSkyLowResResources(ctx);
 
-    // Shown by default on first run per showControlsOnStartup (itself persisted); applied
-    // after loadSettings() so a saved false sticks. viewControlsChrome.open is intentionally
-    // NOT persisted — closing it only lasts for the current run (see buildViewControlsWindow).
-    viewControlsChrome.open = showControlsOnStartup;
-
     // NEW-7: fpsCapMode (just loaded above) may differ from the VulkanContext default the
     // startup swapchain was already created with (FIFO/VSync) — push it through now. Idempotent
     // and cheap when the loaded value already matches, same reasoning as the render-scale
