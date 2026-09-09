@@ -151,11 +151,17 @@ bool dbgSkipOceanRefl()  { return (cloud.dbgDisableMask & 8u) != 0u; }
 layout(set = 0, binding = 10) uniform sampler2D cloudTargetA;
 layout(set = 0, binding = 11) uniform sampler2D cloudTargetB;
 
-// Light pollution dome (binding 12): same buffer as sat_flare.comp's binding 3 (16 azimuth
-// sectors, CPU-written each frame). A second, independent read here so the Milky Way skybox can
-// be dimmed directionally the same way satellites/stars already are.
+// Light pollution dome (binding 12): same buffer as sat_flare.comp's binding 3, CPU-written each
+// frame, TWO halves of 16 azimuth sectors each (see SatelliteSim::uploadLightDome).
+//   lightDome[]      — gain-scaled linear city brightness; what satellites/stars are dimmed by.
+//   lightDomeEased[] — the DARK-SKY dome: the same sectors' RAW (pre-lightPollutionGain) brightness
+//                      log-mapped to a normalized [0,1] pristine->inner-city axis and temporally
+//                      eased. Feeds darkSkySkyMag() for the Milky Way and zodiacal light below,
+//                      and for the aurora in cloud_march.comp.
+// sat_flare.comp declares only the first half and is unaffected by the growth.
 layout(std430, set = 0, binding = 12) readonly buffer LightDomeBuf {
     float lightDome[16];
+    float lightDomeEased[16];
 };
 
 // Milky Way skybox (binding 13): 8K equirectangular galactic panorama. Sampled against the
@@ -186,6 +192,26 @@ layout(location = 0) out vec4 outColor;
 // the shared header now. terrain.glsl brings the DEM decode + observer-frame helpers.
 #include "common.glsl"
 #include "terrain.glsl"
+#include "darksky.glsl"   // dark-sky exposure gate (Milky Way / zodiacal)
+
+// ── Milky Way surface-brightness anchors ─────────────────────────────────────────────────────
+// File scope, not block-local, because TWO places gate this panorama on them: the direct sky view
+// and the ocean sky-reflection. Two copies would be free to drift and the symptom — a reflection
+// fading at a different sky brightness than the sky it reflects — would be subtle and confusing.
+//
+// Measured, not guessed. The panorama is VK_FORMAT_R8G8B8A8_SRGB, so what the sampler delivers is
+// linear; its luminance histogram runs ~0.0006 for empty sky between stars, ~0.003 faint band,
+// ~0.015 mid-band, 0.05-0.115 for the galactic core. Anchoring 0.05 -> 21.0 mag/arcsec^2 puts the
+// core at the real Milky Way core's surface brightness.
+//
+// kMwMagSpread is well under the physical 2.5 mag/decade because this is a stretched photograph:
+// its faint regions sit relatively brighter than the real sky. It is also half of the gate's
+// contrast-stretch control (kVisSharpness is the other half) — at the original 1.6 the band's own
+// 1.2-decade range covered essentially the whole response window, so the gate doubled as a hard
+// contrast stretch and the Milky Way got SHARPER as it faded. See darksky.glsl before retuning.
+const float kMwRefLum    = 0.05;
+const float kMwRefMag    = 21.0;
+const float kMwMagSpread = 0.85;
 
 // ── Cloud noise domain frequencies ─────────────────────────────────────────────
 // Cloud procedural noise (cloudNoiseTex) is sampled by TRUE 3D unit-sphere position
@@ -2313,6 +2339,18 @@ void main() {
             vec3 reflDir   = reflect(dir, waveN);
             vec3 reflColor = vec3(0.12, 0.28, 0.50) * dayFrac;
             float reflStr  = fresnel * exp(-dist / 40000.0);
+
+            // Feature-reflection fade. Clouds, aurora and the Milky Way only reflect believably
+            // off resolved 3D wave facets — the close-up detail waveN carries. As the surface
+            // flattens toward a perfect mirror, either with observer altitude (altFade, shared
+            // with the wave-normal detail budget) or with distance to this ocean point, those
+            // discrete sky features should drop out: a mirror-flat sea seen from orbit rendering
+            // a crisp inverted Milky Way / aurora band reads as plain wrong. What survives at
+            // distance is the smooth scattered-sky reflection (reflColor's atmosphere march) plus
+            // the sun and moon glints below — those are broad specular lobes, physically correct
+            // on any surface roughness, and are deliberately NOT gated by this.
+            float featureReflFade = altFade * (1.0 - smoothstep(3000.0, 8000.0, dist));
+
             if (!dbgSkipOceanRefl() && dot(reflDir, surfUp) > 0.0 && reflStr > 0.005) {
                 vec2 tAR = raySphere(hitPt, reflDir, R_ATMOS);
                 if (tAR.y > 0.0) {
@@ -2343,6 +2381,28 @@ void main() {
                     reflColor = SUN_INTENSITY * (rpR * BETA_R * rAccR + vec3(rpM * BETA_M * rAccM));
                 }
 
+                // Screen-space occlusion lookup for the REFLECTED ray, shared by the aurora and
+                // Milky Way reflections below. Same technique as the satellite/sun lens-flare
+                // occlusion above: project reflDir with the same skyView transform and sample what
+                // the compute passes already wrote for that direction, rather than re-marching
+                // cloud density or terrain along reflDir here. Hoisted out of the aurora block
+                // when the Milky Way reflection was added — both want it, and it is one texture
+                // fetch each instead of two identical ones.
+                //
+                // reflCam.z only proves the direction is in FRONT of the camera, not inside the
+                // frustum; an off-screen reflDir clamps to an edge texel. Pre-existing limitation
+                // of this technique here, not introduced by the hoist.
+                float reflCloudOccl   = 1.0;
+                float reflTerrainOccl = 1.0;
+                vec3  reflCam = mat3(pc.skyView) * reflDir;
+                if (reflCam.z < -0.01) {
+                    float tanHFRefl    = tan(pc.fovYRad * 0.5);
+                    vec2  reflUV       = vec2(reflCam.x, -reflCam.y) / (-reflCam.z * tanHFRefl * 2.0);
+                    vec2  reflScreenUV = vec2(reflUV.x / pc.aspect + 0.5, reflUV.y + 0.5);
+                    reflCloudOccl   = dot(texture(cloudTargetB, reflScreenUV).rgb, vec3(1.0 / 3.0));
+                    reflTerrainOccl = (texture(sceneDepthTex, reflScreenUV).r >= kNoSurfaceT * 0.5) ? 1.0 : 0.0;
+                }
+
                 // Aurora reflection: literally march the curtain shell along the REFLECTED ray
                 // instead of the camera ray — reuses the exact same auroraSampleAt() the primary
                 // sky view uses, so the aurora shows up as a genuine mirror-like glint on the
@@ -2352,7 +2412,7 @@ void main() {
                 // for the full obsEffH-keyed classification the primary march uses.
                 vec2 rAuroraFar = raySphere(hitPt, reflDir, R_EARTH + kAuroraShellOuterM);
                 vec2 rAuroraIn  = raySphere(hitPt, reflDir, R_EARTH + kAuroraShellInnerM);
-                if (rAuroraIn.y > 0.0 && rAuroraIn.y < rAuroraFar.y) {
+                if (featureReflFade > 0.001 && rAuroraIn.y > 0.0 && rAuroraIn.y < rAuroraFar.y) {
                     const int N_AURORA_REFL = 6;
                     float raSeg = (rAuroraFar.y - rAuroraIn.y) / float(N_AURORA_REFL);
                     vec3  accumAuroraRefl = vec3(0.0);
@@ -2373,26 +2433,68 @@ void main() {
                     float extinctMagAuroraRefl = cloud.extinctionCoeff * (airmassAuroraRefl - 1.0);
                     float extinctionAuroraRefl = pow(10.0, -0.4 * extinctMagAuroraRefl);
 
-                    // Cloud occlusion: this march reused auroraSampleAt() (the raw curtain
-                    // function) directly rather than going through cloud_march.comp's
-                    // auroraMarchCS, so it had none of that pass's cloud-suppression — the water
-                    // mirrored the aurora right through an overcast sky. Same fix as the
-                    // satellite/sun lens-flare occlusion above: project reflDir into screen space
-                    // with the same skyView transform and sample the transmittance
-                    // cloud_march.comp already wrote for that direction into cloudTargetB, rather
-                    // than re-marching cloud density along reflDir here.
-                    float auroraReflCloudOccl = 1.0;
-                    vec3  reflCam = mat3(pc.skyView) * reflDir;
-                    if (reflCam.z < -0.01) {
-                        float tanHFRefl = tan(pc.fovYRad * 0.5);
-                        vec2  reflUV       = vec2(reflCam.x, -reflCam.y) / (-reflCam.z * tanHFRefl * 2.0);
-                        vec2  reflScreenUV = vec2(reflUV.x / pc.aspect + 0.5, reflUV.y + 0.5);
-                        auroraReflCloudOccl = dot(texture(cloudTargetB, reflScreenUV).rgb, vec3(1.0 / 3.0));
-                    }
-
+                    // Cloud occlusion (reflCloudOccl, hoisted above): this march reused
+                    // auroraSampleAt() (the raw curtain function) directly rather than going
+                    // through cloud_march.comp's auroraMarchCS, so it had none of that pass's
+                    // cloud-suppression — the water mirrored the aurora right through an overcast
+                    // sky. Deliberately does NOT take reflTerrainOccl, which is new with the Milky
+                    // Way reflection: leaving this term's behaviour exactly as it was.
                     reflColor += accumAuroraRefl * raSeg * kAuroraScale * cloud.auroraGain
-                               * extinctionAuroraRefl * auroraReflCloudOccl;
+                               * extinctionAuroraRefl * reflCloudOccl * featureReflFade;
                 }
+
+                // ── Milky Way reflection ──────────────────────────────────────────────────────
+                // Same panorama, same galactic basis and same dark-sky exposure gate as the direct
+                // view far above, evaluated along reflDir instead of dir — so on calm water under
+                // a dark sky the band genuinely shows up in the reflection, and it dims with
+                // skyglow and twilight coherently with the sky it is reflecting. Far cheaper than
+                // the aurora reflection directly above it (one texture fetch, no shell march).
+                //
+                // SKY_LITE (Planetarium tier) cuts it for the same reason the direct view is cut
+                // there: the equirect projection's atan/asin plus the panorama fetch is the exact
+                // combination that does not fit that tier's budget. A tier that does not draw the
+                // Milky Way must not draw its reflection either.
+#ifndef SKY_LITE
+                if (featureReflFade > 0.001) {
+                    // Forced mip, NOT a plain texture(): the reflected direction comes off a
+                    // noise-perturbed wave normal, so neighbouring pixels sample points far apart
+                    // on a high-contrast panorama and the band scintillates. Sampling a blurred
+                    // level is also the physically right answer — a rough surface reflects a
+                    // blurred image, which is why the ocean already blurs city lights through
+                    // cloud.cityLightBlurLod.
+                    const float kOceanMwReflLod = 3.0;
+                    vec3 rDirGal = vec3(dot(reflDir, cloud.mwBasisRow0.xyz),
+                                        dot(reflDir, cloud.mwBasisRow1.xyz),
+                                        dot(reflDir, cloud.mwBasisRow2.xyz));
+                    float rLonGal = atan(rDirGal.y, rDirGal.x);
+                    float rLatGal = asin(clamp(rDirGal.z, -1.0, 1.0));
+                    vec2  rMwUV   = vec2(0.5 + rLonGal / (2.0 * PI), 0.5 + rLatGal / PI);
+                    vec3  rMwColor = textureLod(milkyWayTex, rMwUV, kOceanMwReflLod).rgb
+                                   * cloud.mwBasisRow0.w;
+
+                    // Exposure gate against reflDir's OWN sky background — the reflection shows
+                    // the patch of sky the wave points at, which can be a very different
+                    // brightness from the patch the camera is looking at directly (the twilight
+                    // anisotropy alone spans ~3 magnitudes across the sky).
+                    float rMwSkyBgMag = darkSkySkyMag(reflDir, sunDirENU);
+                    float rMwLum      = dot(rMwColor, vec3(0.2126, 0.7152, 0.0722));
+                    float rMwObjMag   = darkSkySurfMag(rMwLum, kMwRefLum, kMwRefMag,
+                                                       kMwMagSpread);
+
+                    // Extinction along the REFLECTED ray's own elevation, matching the aurora
+                    // reflection's reasoning: that is the path this light actually took through
+                    // the atmosphere before bouncing off the water. Matters here more than for the
+                    // direct view, since Fresnel biases ocean reflections toward grazing angles.
+                    float sinElMwRefl   = clamp(reflDir.z, 0.0, 1.0);
+                    float elDegMwRefl   = degrees(asin(sinElMwRefl));
+                    float airmassMwRefl = 1.0 / (sinElMwRefl + 0.50572 * pow(elDegMwRefl + 6.07995, -1.6364));
+                    float extinctionMwRefl = pow(10.0, -0.4 * cloud.extinctionCoeff * (airmassMwRefl - 1.0));
+
+                    reflColor += rMwColor * darkSkyVis(rMwObjMag, rMwSkyBgMag)
+                               * extinctionMwRefl * reflCloudOccl * reflTerrainOccl
+                               * cloud.oceanMwReflGain * featureReflFade;
+                }
+#endif
             }
 
             // Refracted subsurface color (SEA_BASE + diffuse * SEA_WATER_COLOR)
@@ -2654,11 +2756,9 @@ void main() {
         float moonBrightSky = tm * tm * moonDirENU.w;
         const float kMWMoonMaxDim = 0.95;
 
-        // Directional dome geometry — copied from sat_flare.comp's domeVal computation (session
-        // 26), using this fragment's own view direction (dir) in place of a satellite's skyDir.
-        // Only sec0w/sec1w/secFrac/elevFalloffMW are still needed here (for beamDomeVal below) —
-        // the shared domeAz/kIsotropicFrac/domeVal curve itself is NOT used for the Milky Way's
-        // own pollution response any more (see mwSuppressEased below for why).
+        // Directional dome geometry — sector lookup shared with beamDomeVal below and with the
+        // dark-sky sky-background estimate. Interpolated between the two nearest sector CENTERS,
+        // same as every other consumer of this dome.
         float azLP    = mod(atan(dir.x, dir.y) + 6.283185307, 6.283185307);
         float secF    = azLP * (16.0 / 6.283185307) - 0.5;
         int   sec0    = int(floor(secF));
@@ -2667,16 +2767,11 @@ void main() {
         int   sec1w   = (sec0w + 1) % 16;
         float elevFalloffMW = 0.35 / (max(dir.z, 0.0) + 0.35);
 
-        // Milky Way-specific pollution response (replaces the old shared domeVal/kMWPollutionMaxDim
-        // linear dim, which started dimming the Milky Way the instant ANY light pollution was
-        // present and never fully hid it — 0.99 max dim still lets 1% through). The Milky Way
-        // should read as invisible until skies are genuinely dark, and cloud.mwSuppressEased is a
-        // CPU-side value already hysteresis-eased over mwPollutionThresholdLo/Hi (SatelliteSim.h,
-        // see updateLightPollutionDome()) — a single non-directional "is it dark enough here" gate,
-        // deliberately not per-pixel like domeVal/beamDomeVal: the Milky Way is a large diffuse
-        // feature, not something whose suppression should pop differently by look direction the
-        // way a single city's horizon glow does.
-        float mwPollutionSuppress = cloud.mwSuppressEased;
+        // Sky background surface brightness for THIS view direction (mag/arcsec^2). Replaces
+        // cloud.mwSuppressEased, a single non-directional scalar derived from a MAX over all 16
+        // sectors — so a city on one horizon suppressed the Milky Way everywhere, including the
+        // darkest part of the sky opposite it. See darksky.glsl for the model.
+        float mwSkyBgMag = darkSkySkyMag(dir, sunDirENU);
 
         // C12 follow-up #31: same suppression shape, second independent source — a nearby
         // Reflect-Orbital beam should wash out the Milky Way the same way real light pollution
@@ -2710,8 +2805,13 @@ void main() {
         // mostly redundant with nightFactorEffSky already zeroing everything once the sun is up,
         // but it also correctly dims the Milky Way near the sun during twilight, when the rest of
         // the sky is still dark enough to show it.
+        // Gated on the sun actually being above the spherical horizon (same limbZ test the sun
+        // disc's own visibility uses below) — a pure angle-to-sunDir test has no notion of what's
+        // along that line of sight, so without this it kept dimming the Milky Way toward the
+        // sunset point (or, from orbit, toward wherever the Earth hides the sun) long after the
+        // sun itself was fully Earth-occluded and no real glare could exist.
         float sunAngleMW = acos(clamp(dot(dir, sunDir), -1.0, 1.0));
-        float sunGlareSuppress = smoothstep(0.12, 0.5, sunAngleMW); // 0 within ~7deg, 1 beyond ~29deg
+        float sunGlareSuppress = (sunDirENU.w > limbZ) ? smoothstep(0.12, 0.5, sunAngleMW) : 1.0; // 0 within ~7deg, 1 beyond ~29deg or sun occluded
 
         // Project the view ray into the galactic frame and sample the panorama.
         vec3 dirGal = vec3(dot(dir, cloud.mwBasisRow0.xyz),
@@ -2731,8 +2831,24 @@ void main() {
         // same way aurora/atmosphere are, but a steeper power curve on the same continuous value
         // works without needing that.
         const float kMWCloudSuppressPower = 3.0;
+
+        // ── Dark-sky exposure gate (per-texel, not a uniform dim) ─────────────────────────────
+        // The single most important property here: objMag is derived from THIS TEXEL's own
+        // luminance, so as the sky brightens the faint outer arms drop out while the galactic core
+        // hangs on. That is the real rural->suburban transition, and it is exactly what the
+        // previous whole-texture scalar multiply could not produce at any tuning — a scalar can
+        // only make the entire Milky Way uniformly dimmer, never thinner.
+        //
+        // The surface-brightness anchors live at file scope (search "Milky Way surface-brightness
+        // anchors") along with their calibration, because the ocean sky-reflection further down
+        // gates the same panorama on the same curve — two copies would be free to drift, and the
+        // symptom (a reflection fading at a different sky brightness than the sky it reflects)
+        // would be subtle.
+        float mwLum = dot(mwColor, vec3(0.2126, 0.7152, 0.0722));
+        float mwObjMag = darkSkySurfMag(mwLum, kMwRefLum, kMwRefMag, kMwMagSpread);
+
         float visibility = nightFactorEffSky
-                          * (1.0 - mwPollutionSuppress)
+                          * darkSkyVis(mwObjMag, mwSkyBgMag)
                           * (1.0 - beamDomeVal * kMWBeamPollutionMaxDim)
                           * (1.0 - moonBrightSky * kMWMoonMaxDim)
                           * extinctionMW
@@ -2741,6 +2857,126 @@ void main() {
                           * (moonDiscHit ? 0.0 : 1.0)    // blocked by the Moon's own opaque disc
                           * pow(clamp(cloudBlock, 0.0, 1.0), kMWCloudSuppressPower);
         color += mwColor * visibility;
+    }
+#endif
+
+    // ── Zodiacal light ─────────────────────────────────────────────────────────
+    // SKY_LITE (Planetarium-tier): cut, same as the Milky Way block above. Cheaper than that one
+    // (no panorama fetch, no equirect projection) but not free — two acos, an asin, an atan for
+    // the pollution-dome lookup, two exps and two pows per pixel, plus ~100 lines of added
+    // fragment code. SKY_LITE exists because this shader's compiled SIZE collapses wavefront
+    // occupancy on GCN1-class parts, not only because of what executes, so new post-tonemap
+    // sky terms default to being cut there. Flip this to render zodiacal light at that tier.
+#ifndef SKY_LITE
+    // Sunlight scattered by interplanetary dust in the ecliptic plane — a faint, warm-white
+    // diffuse cone brightest a few degrees beyond the sun's own corona, fading with elongation,
+    // plus a much fainter "gegenschein" patch directly opposite the sun. Pure analytic falloff,
+    // no texture: elongation from the sun needs only sunDir (already in scope); ecliptic latitude
+    // needs the one new CPU-computed basis vector, cloud.eclipticPoleENU (see updatePositions()
+    // and cloud_params.glsl). Added post-tonemap for the same reason the Milky Way/sun disc/moon
+    // corona are — a faint additive term should read at a consistent brightness regardless of
+    // whatever exposure the raw HDR atmosphere integral needed that frame, not get compressed or
+    // blown out differently by EXPOSURE_DAY/EXPOSURE_NIGHT depending on sky brightness that frame.
+    // Deliberately does NOT reuse the Milky Way's sunGlareSuppress above — that exists specifically
+    // to dim things NEAR the sun, which is exactly where zodiacal light is brightest; innerFade
+    // below handles the seam against the corona for an unrelated reason (avoiding a double-bright
+    // ring, not glare). Locals below duplicate the Milky Way block's day/night/moon/extinction/
+    // dome shapes rather than reaching across the closed `{}` above — same per-block-local
+    // convention this file already uses everywhere else.
+    {
+        float theta = acos(clamp(dot(dir, sunDir), -1.0, 1.0));
+        float beta  = asin(clamp(dot(dir, cloud.eclipticPoleENU.xyz), -1.0, 1.0));
+
+        // Main cone: innerFade clears the sun corona's own falloff (coronaSig maxes at ~0.08 rad
+        // above), outerFade closes it out by cloud.zodiacalOuterFadeDeg. The ecliptic-latitude
+        // sigma narrows with elongation — wide and low near the sun/horizon, narrowing further
+        // out — the real cone shape.
+        float innerFade = smoothstep(0.09, 0.17, theta);
+        float outerR1   = radians(cloud.zodiacalOuterFadeDeg);
+        float outerR0   = outerR1 * 0.75;
+        float outerFade = 1.0 - smoothstep(outerR0, outerR1, theta);
+        float sigmaNear = radians(cloud.zodiacalWidthDeg);
+        float sigmaFar  = sigmaNear * 0.45;
+        float sigmaLat  = mix(sigmaNear, sigmaFar, smoothstep(0.0, 1.2, theta));
+        float latFalloff = exp(-(beta * beta) / (2.0 * sigmaLat * sigmaLat));
+        float zodMain = innerFade * outerFade * latFalloff;
+
+        // Gegenschein: same shape mirrored around the antisolar direction, tight and dim, no
+        // separate slider — real zodiacal light's opposition brightening is subtle.
+        float thetaAnti = acos(clamp(dot(dir, -sunDir), -1.0, 1.0));
+        float outerFadeAnti  = 1.0 - smoothstep(radians(15.0), radians(25.0), thetaAnti);
+        float sigmaAnti       = sigmaNear * 0.6;
+        float latFalloffAnti  = exp(-(beta * beta) / (2.0 * sigmaAnti * sigmaAnti));
+        const float kZodGegenscheinRatio = 0.07;
+        float gegenschein = outerFadeAnti * latFalloffAnti * kZodGegenscheinRatio;
+        float zodShape = zodMain + gegenschein;
+
+        // Color: pale warm-white, far less saturated than the sun disc/corona (vec3(1.8,0.7,0.2)
+        // above) — a faint wash, not a second sun. Mirrors the sun disc's own sunsetT shape for a
+        // consistent warm shift near the horizon; the gegenschein (night-side) stays unwarmed.
+        float sunsetTZod = clamp(1.0 - (sunDirENU.w - limbZ) / 0.15, 0.0, 1.0);
+        vec3  zodColMain = mix(vec3(1.00, 0.98, 0.92), vec3(1.05, 0.88, 0.68), sunsetTZod * 0.5);
+        vec3  zodColAnti = vec3(1.0, 0.98, 0.95);
+        vec3  zodCol = (zodMain * zodColMain + gegenschein * zodColAnti) / max(zodShape, 1e-4);
+
+        // Visibility chain — same day/night, moonlight, terrain/cloud/moon-disc occlusion shape
+        // the Milky Way uses above, minus sunGlareSuppress (see header comment). Pollution now
+        // goes through the SAME dark-sky exposure gate the Milky Way does (darksky.glsl), reading
+        // the same eased dome half: the two features are lit by the same sky, so they should be
+        // gated by one model. Their different real-world visibility falls out of their different
+        // surface-brightness anchors below, not out of separately-tuned max-dim ceilings.
+        float atmFracSkyZ    = 1.0 - clamp((obsEffH - 40000.0) / (100000.0 - 40000.0), 0.0, 1.0);
+        float nightFactorSkyZ = clamp(-sunDirENU.w * 5.0, 0.0, 1.0);
+        // cloud.skyGlareVisibility, not pc.: this field moved into the CloudParams UBO when
+        // SatDrawPC was trimmed to the 128-byte maxPushConstantsSize floor. The Milky Way
+        // block above reads it the same way.
+        float nightFactorEffZ = mix(cloud.skyGlareVisibility, nightFactorSkyZ, atmFracSkyZ);
+
+        float tmZ = clamp(moonDirENU.z / 0.5, 0.0, 1.0);
+        float moonBrightZ = tmZ * tmZ * moonDirENU.w;
+        const float kZodMoonMaxDim = 0.9;
+
+        // Ray's own tangent-altitude extinction (not the observer-altitude atmFracSkyZ above) —
+        // same rayTangentAltM correction documented for aurora/satellites/stars/planets/Milky Way.
+        float atmFracExtinctZ = 1.0 - clamp((rayTangentAltM(obsPos, dir) - 40000.0) / (100000.0 - 40000.0), 0.0, 1.0);
+        float sinElZ    = clamp(dir.z, 0.0, 1.0);
+        float elDegZ    = degrees(asin(sinElZ));
+        float airmassZ  = 1.0 / (sinElZ + 0.50572 * pow(elDegZ + 6.07995, -1.6364));
+        float extinctMagZ = cloud.extinctionCoeff * (airmassZ - 1.0) * atmFracExtinctZ;
+        float extinctionZ = pow(10.0, -0.4 * extinctMagZ);
+
+        // ── Dark-sky exposure gate ────────────────────────────────────────────────────────────
+        // Same model as the Milky Way above (darksky.glsl), replacing the old
+        // (1 - domeValZ * 0.85) linear dim with its own hand-picked ceiling. Per-sample here too:
+        // zodShape falls off with elongation and ecliptic latitude, so the cone's bright inner
+        // part survives a sky that its faint outer edge and the gegenschein do not — the cone
+        // shrinks toward the sun as skies brighten instead of the whole wedge fading uniformly.
+        //
+        // Anchor: peak output is zodShape(<=1) * zodiacalGain (0.01 by default), so 0.01 is the
+        // brightest this feature gets. Mapping that to 21.6 mag/arcsec^2 puts it just below the
+        // Milky Way's core, matching reality — zodiacal light is comparable in surface brightness
+        // to the Milky Way but is generally considered the harder of the two to see, and it
+        // correspondingly drops out one step earlier on the Bortle ladder here. Same 0.85 spread
+        // as the Milky Way, for the same reason (a tuned artistic falloff, not a radiometric one,
+        // and half of the contrast-stretch control — see darksky.glsl).
+        float zodSkyBgMag = darkSkySkyMag(dir, sunDirENU);
+
+        const float kZodRefLum    = 0.01;
+        const float kZodRefMag    = 21.6;
+        const float kZodMagSpread = 0.85;
+        float zodLum = zodShape * cloud.eclipticPoleENU.w * dot(zodCol, vec3(0.2126, 0.7152, 0.0722));
+        float zodObjMag = darkSkySurfMag(zodLum, kZodRefLum, kZodRefMag, kZodMagSpread);
+
+        const float kZodCloudSuppressPower = 2.0;
+        float visibilityZod = nightFactorEffZ
+                             * (1.0 - moonBrightZ * kZodMoonMaxDim)
+                             * extinctionZ
+                             * (tSurface > 0.0 ? 0.0 : 1.0) // blocked by terrain/ocean
+                             * (moonDiscHit ? 0.0 : 1.0)    // blocked by the Moon's own opaque disc
+                             * pow(clamp(cloudBlock, 0.0, 1.0), kZodCloudSuppressPower)
+                             * darkSkyVis(zodObjMag, zodSkyBgMag);
+
+        color += zodCol * zodShape * cloud.eclipticPoleENU.w * visibilityZod;
     }
 #endif
 

@@ -1134,16 +1134,52 @@ struct GpuCloudParams
     float beamSkyGlowGain;      // beam->cloud illumination brightness (shared: sky frag + march)
     float beamGlowBleedGain;    // beam-driven sky-illumination wash gain (sat_sky.frag)
     float beamProximityGlow;    // CPU [0,1] observer-near-a-beam-line wash (sat_sky.frag)
-    float mwSuppressEased;      // Milky Way's own light-pollution suppression [0,1] (sat_sky.frag)
+    // Sky background surface brightness (mag/arcsec^2, larger = fainter) the light-pollution dome
+    // asymptotes to at its bright end — the "inner city" anchor of the dark-sky exposure gate
+    // (shaders/include/darksky.glsl). Reuses the slot that carried mwSuppressEased, the single
+    // non-directional Milky Way suppression scalar that gate replaced: same offset, same size, so
+    // this is a rename rather than a layout change. Mirror of cloud_params.glsl.
+    float darkSkyCityMag;
     float cloudShadowRangeM;    // per-pixel terrain cloud-shadow fade distance (cloud_march.comp)
     float skyScreenW;           // sat_sky.frag render-target width  (skyLowResExtent at renderScale<1,
     float skyScreenH;           // else ctx.swapExtent) — for gl_FragCoord->UV; the point shaders
                                 // carry their own screenSizePx (always full-res) in PointDrawPC
+    // Zodiacal light, 532 -> 560. See cloud_params.glsl for the full design.
+    float zodiacalWidthDeg;     // ecliptic-latitude Gaussian sigma near the sun (degrees)
+    float zodiacalOuterFadeDeg; // elongation at which the cone has fully faded (degrees)
+    // LOAD-BEARING PAD, not filler. On the zodiacal-light branch these two floats sat at 488/492
+    // and the vec4 landed on 496 by luck. Behind the push-constant relief block above they sit at
+    // 532/536, leaving 540 — not 16-byte aligned. std140 aligns the vec4 up to 544; glm::vec4 is
+    // 4-aligned by default (no GLM_FORCE_ALIGNED_GENTYPES) so C++ would pack it at 540 and every
+    // subsequent field would read its neighbour's bytes. The static_assert catches the resulting
+    // size change (556 vs 560), but a future permutation at equal size would not — run
+    // tools/check_cloud_params.py.
     float pad21;
-    float pad22;
-    float pad23;
+    glm::vec4 eclipticPoleENU;  // xyz = ENU unit vector to ecliptic north pole, w = zodiacalGain
+    // ── Dark-sky twilight term (560 -> 576) ──────────────────────────────────────────────────
+    // Sun's own contribution to sky background brightness, for the dark-sky exposure gate in
+    // darksky.glsl. Before this, the ONLY solar gate on the Milky Way was nightFactorEffSky's
+    // clamp(-sunDirENU.w * 5, 0, 1), which saturates at sin(el) = -0.2 — i.e. it stops suppressing
+    // anything once the sun is a mere 11.5 deg below the horizon, less than the end of NAUTICAL
+    // twilight. So the Milky Way appeared at full strength while the sky was still visibly bright.
+    // It was also completely non-directional, which is the bigger error: real twilight is an arch
+    // low on the sun's side of the sky while the antisolar sky is already dark, so the Milky Way
+    // should emerge from the east first, not everywhere at once.
+    //
+    // Appended (not slotted into an existing pad) per this header's own guidance. 3 fields + pad23:
+    // std140 rounds the block up to a 16-byte multiple while C++ would pack it at 572, so the pad
+    // is LOAD-BEARING exactly like pad21 above. Do not reuse it.
+    float darkSkyTwilightMag0;   // sky surface brightness with the sun ON the horizon (mag/arcsec^2)
+    float darkSkyTwilightEndDeg; // solar depression at which the sky reaches pristine (18 = the real
+                                 // end of astronomical twilight); the single best "how long after
+                                 // sunset does the Milky Way come out" knob
+    float darkSkyTwilightAniso;  // magnitudes the ANTISOLAR sky is darker than the solar side
+    float oceanMwReflGain;       // gain on the Milky Way's reflection in the ocean surface
+                                 // (sat_sky.frag). Claimed the alignment pad this block was
+                                 // appended with — a real float either way, so the 16-byte
+                                 // rounding it exists for is unchanged.
 };
-static_assert(sizeof(GpuCloudParams) == 544, "GpuCloudParams layout mismatch");
+static_assert(sizeof(GpuCloudParams) == 576, "GpuCloudParams layout mismatch");
 
 // ── Push constants for sat_orbit.comp ────────────────────────────────────────
 // Offsets verified against the push_constant block in sat_orbit.comp.
@@ -1789,10 +1825,26 @@ private:
     VkDeviceMemory lightDomeMem = VK_NULL_HANDLE;
     void *lightDomeMapped = nullptr;
     float lightDomeAz[kNumLightSectors]{}; // CPU-side copy, shared with updateStars()
-    // Raw (pre-lightPollutionGain) max local city-brightness across all sectors, written each
-    // frame by updateLightPollutionDome() and consumed immediately after by recordCompute()'s
-    // mwSuppressEased hysteresis step — see that member's comment. Transient, not persisted.
-    float mwPollutionRaw = 0.0f;
+    // Second half of lightDomeBuf (which is therefore 2*kNumLightSectors floats, not
+    // kNumLightSectors): the DARK-SKY dome. Same 16 sectors, but each entry is a normalized [0,1]
+    // "how far from pristine toward inner-city" figure — the RAW, pre-lightPollutionGain city
+    // brightness log-mapped against mwPollutionThresholdLo/Hi and then temporally eased with
+    // mwFadeInTimeS/mwFadeOutTimeS. Consumed by sat_sky.frag (Milky Way, zodiacal) and
+    // cloud_march.comp (aurora) through darkSkySkyMag() in shaders/include/darksky.glsl.
+    //
+    // A separate half rather than a second buffer: it is the same conceptual dome sampled by the
+    // same sector geometry, every consumer that wants one already binds this buffer, and
+    // sat_flare.comp needs no change at all because it declares only the first 16 floats (trailing
+    // storage-buffer data is simply not read). Grown to 32 rather than reusing lightDomeAz because
+    // the two halves must NOT be the same numbers: satellites/stars want the gain-scaled linear
+    // value, dark-sky features want the ungained log-mapped one — that decoupling is deliberate
+    // and predates this (see mwPollutionThresholdLo/Hi).
+    //
+    // Replaces mwPollutionRaw + mwSuppressEased, which together were a MAX over all 16 sectors
+    // eased into one non-directional scalar — i.e. a city on the north horizon suppressed the dark
+    // southern zenith identically. Easing moved here, onto the dome ITSELF (the input), so the
+    // hysteresis still does its job without flattening the direction information out of it.
+    float lightDomeEasedAz[kNumLightSectors]{};
     VkDescriptorSetLayout skyDescLayout = VK_NULL_HANDLE;
     VkDescriptorPool skyDescPool = VK_NULL_HANDLE;
     VkDescriptorSet skyDescSet = VK_NULL_HANDLE;
@@ -2097,16 +2149,16 @@ private:
     // guesses — re-synced 2026-08-10 (extinctionCoeff, lightPollutionGain, and the Milky Way
     // pollution-response block moved noticeably; the rest were already current), then rounded to
     // 2 significant figures 2026-08-15 (see the cloud block's note below — same pass, same rule).
-    float brightnessScale = 1.0f;
+    float brightnessScale = 0.93f;
     float daySuppression = 570.0f;
-    float mirrorBoost = 430.0f;
+    float mirrorBoost = 1000.0f;
     float visThresh = 0.0001f;
-    float highlightFlare = 0.17f;
+    float highlightFlare = 0.014f;
     float moonSuppression = 6.6f;    // sky background suppression from moonlight (mirrors daySuppression,
                                      // user-tuned value — moon is ~14 magnitudes dimmer than the sun)
-    float lightPollutionGain = 7.0f; // multiplies lightDomeAz[] at the source (updateLightPollutionDome),
+    float lightPollutionGain = 25.0f; // multiplies lightDomeAz[] at the source (updateLightPollutionDome),
                                      // so satellites + stars stay coherently scaled by construction
-    float extinctionCoeff = 0.092f;  // atmospheric extinction, magnitudes per airmass (Kasten & Young
+    float extinctionCoeff = 0.079f;  // atmospheric extinction, magnitudes per airmass (Kasten & Young
                                      // 1989); ~0.2-0.3 is typical clear-sky sea-level; shared formula
                                      // in both sat_flare.comp and updateStars() so a star and a
                                      // satellite at the same elevation dim identically
@@ -2119,17 +2171,45 @@ private:
     // computeNormal()), read back for the selection-panel "Power output" line in
     // formatSelectedSatInfo(). 0° = no mitigation, bit-identical to plain SunTracking.
     float flareMitigationTiltDeg = 0.0f;
-    // ── Milky Way pollution response (own threshold + hysteresis, decoupled from
-    //    lightPollutionGain/kMWPollutionMaxDim above — see updateLightPollutionDome() and
-    //    SatDrawPC::mwSuppressEased) ────────────────────────────────────────────
-    // Thresholds are against the RAW (pre-lightPollutionGain) local city-brightness signal, so
-    // retuning lightPollutionGain for star/satellite realism never silently shifts where the Milky
-    // Way cuts off — these two sliders are the only knob for that.
-    float mwPollutionThresholdLo = 0.0022f; // below this: Milky Way at full brightness
-    float mwPollutionThresholdHi = 0.036f;  // at/above this: fully suppressed (narrow band = steep cutoff)
-    float mwFadeInTimeS = 3.2f;             // seconds to fade back IN once local pollution drops out of the
-                                            // band above (bright area -> dark, or ascending into space)
-    float mwFadeOutTimeS = 0.0f;            // seconds to fade back OUT once it rises back into the band
+    // ── Dark-sky exposure gate (Milky Way / zodiacal / aurora) ────────────────
+    // Anchors of the sky-background curve in shaders/include/darksky.glsl. Still against the RAW
+    // (pre-lightPollutionGain) local city-brightness signal, so retuning lightPollutionGain for
+    // star/satellite realism never silently shifts where dark-sky features cut off — that
+    // decoupling is why these sliders exist and it is preserved verbatim.
+    //
+    // Their MEANING is now the two ends of a logarithmic sky-brightness ramp rather than the ends
+    // of a hard visibility smoothstep: Lo is the level at/below which the sky reads as pristine
+    // (kSkyMagPristine, 22.0 mag/arcsec^2), Hi the level at which it has fully reached
+    // darkSkyCityMag. The tuned values below are unchanged and still bracket the same transition —
+    // a factor of ~16 between them is ~3 magnitudes, which is about the real rural-to-city span.
+    // What changed is that the ramp is now evaluated PER DIRECTION and each feature is then gated
+    // on its own per-sample surface brightness, so the transition sweeps across a feature (faint
+    // arms first, galactic core last) instead of dimming all of it as a block.
+    float mwPollutionThresholdLo = 0.0f; // at/below this: sky reads as pristine (22.0 mag/arcsec^2).
+                                         // 0 is a legitimate tuned value, not "unset": easeDarkSkyDome
+                                         // guards with max(lo, 1e-6), so 0 means "the ramp starts at
+                                         // the faintest signal the night texture can express", which
+                                         // is what stretches it over ~4.9 decades instead of ~1.2
+    float mwPollutionThresholdHi = 0.075f;  // at/above this: sky has fully reached darkSkyCityMag
+    // Sky background surface brightness at the Hi end, mag/arcsec^2 (LARGER = FAINTER — the
+    // astronomical convention). 18.0 is a real Bortle 8-9 inner-city zenith. Pushed to both
+    // shaders as GpuCloudParams::darkSkyCityMag.
+    float darkSkyCityMag = 16.0f;
+    // Twilight half of the same gate — the sun's own contribution to sky brightness. See
+    // darkSkyTwilightMag() in shaders/include/darksky.glsl for the model and why the old
+    // nightFactorEff ramp alone was not enough (it stops suppressing anything with the sun only
+    // 11.5 deg down, and is the same in every direction).
+    float darkSkyTwilightMag0 = 12.0f;   // sky brightness with the sun ON the horizon (mag/arcsec^2)
+    float darkSkyTwilightEndDeg = 18.0f; // solar depression at which the sky reaches pristine — the
+                                         // real end of astronomical twilight, and the main knob for
+                                         // "how long after sunset does the Milky Way appear"
+    float darkSkyTwilightAniso = 3.0f;   // magnitudes the antisolar sky is darker than the solar side
+    // Temporal easing, now applied to the DOME (the gate's input) rather than to a final
+    // visibility scalar — so the hysteresis still smooths a flight over a city boundary without
+    // flattening the per-direction/per-sample structure the gate exists to produce.
+    float mwFadeInTimeS = 2.1f;             // seconds to fade back IN once local pollution drops (bright
+                                            // area -> dark, or ascending into space)
+    float mwFadeOutTimeS = 0.26f;            // seconds to fade back OUT once local pollution rises
     float sunlitBgVisibility = 0.15f;       // Stars/Milky Way visibility fraction in space when the sun is
                                             // off-screen but the observer is still in direct sunlight — 0 =
                                             // fully hidden (like being fully day-suppressed), 1 = as visible as
@@ -2140,7 +2220,7 @@ private:
     // view-dependent specular term the OBSERVER sees the mirror glint by; this is the physical
     // irradiance the mirror delivers to its ground target, independent of view angle — see
     // sat_orbit.comp's beam-writer comment). Uploaded via SatOrbitPC.
-    float beamGain = 0.0017f;
+    float beamGain = 0.0088f;
     // C12 follow-up #34: beamFootprintRadM (a flat, tunable constant) removed — the ground
     // footprint is now physically derived in sat_orbit.comp from mirror area + range to target.
     float beamMaxRangeM = 1100000.0f; // C12 follow-up #6 — render-time "is the observer close
@@ -2150,7 +2230,7 @@ private:
     // cloud-density march from follow-ups #14-#16, reverted per user request — no cloud lighting
     // yet). Own gain, separate from beamGain (that's the physical ground-irradiance term feeding
     // the ground spot; this purely scales the visual glow's brightness) — dim default, tunable.
-    float beamSkyGlowGain = 0.0088f;
+    float beamSkyGlowGain = 0.0055f;
     // 2026-08-06 reversibility rework: replaced the old rate-limited mirror slew (deg/sec,
     // integrated frame-by-frame — inherently history-dependent, so it could not be made
     // reversible) with a fixed-width sim-time window a satellite commits to one target for. See
@@ -2185,7 +2265,7 @@ private:
     // designed for a camera near/inside the volume). The tube fades out approaching a beam
     // (crossfade in the shader) while this purely angular (no segment geometry) glow term fades
     // in — own gain per [[feedback_shared_gain_sliders]], not a reuse of beamSkyGlowGain.
-    float beamGlowBleedGain = 0.0012f;
+    float beamGlowBleedGain = 0.00048f;
     // C12 follow-up #40: radius (meters) of the crossfade blend zone around a beam's own 3D line —
     // was a hardcoded kNearFieldCrossoverM constant in cloud_march.comp, now user-tunable.
     // Per-pixel cloud shadow fade distance. Was 80 km (matching the deleted 128x128 grid's
@@ -2211,7 +2291,7 @@ private:
     // its own direction, so a cluster can no longer repartition when a member leaves. Lower =
     // finer buckets (more, more coherent clusters); higher = coarser (fewer, cheaper, more
     // blending). Stored in degrees for the UI; converted to bucket counts once per frame.
-    float beamClusterDirThresholdDeg = 38.0f;
+    float beamClusterDirThresholdDeg = 15.0f;
     // 2026-08-12: cross-frame fade for the cloud-light list. Now that every light has a stable
     // integer identity (see TrackedBeamLight), a light that appears, disappears or changes strength
     // can be eased instead of snapping. Deliberately asymmetric fast-in/slow-out, the same
@@ -2219,8 +2299,8 @@ private:
     // relevant should register promptly, but one dropping out should linger rather than blink off.
     // A pure appearance-smoothing knob — it does not change which lights exist, only how quickly
     // their contribution ramps.
-    float beamClusterFadeInS = 0.35f;
-    float beamClusterFadeOutS = 1.5f;
+    float beamClusterFadeInS = 0.71f;
+    float beamClusterFadeOutS = 1.4f;
     // Geometry (position/direction/block altitude/opacity) eases on its own, much shorter constant,
     // deliberately NOT user-exposed. It exists to absorb the small residual steps that survive
     // stable keying — a beam entering or leaving a bucket shifts that bucket's intensity-weighted
@@ -2240,6 +2320,13 @@ private:
     glm::vec3 mwRow0{1.0f, 0.0f, 0.0f};
     glm::vec3 mwRow1{0.0f, 1.0f, 0.0f};
     glm::vec3 mwRow2{0.0f, 0.0f, 1.0f};
+    // ── Zodiacal light ecliptic pole (session follow-up) ────────────────────────
+    // ENU-frame unit vector to the ecliptic north pole, recomputed each frame in
+    // updatePositions() alongside the Milky Way basis above. Unlike mwRow0-2 this is not a full
+    // lon/lat basis — zodiacal light is a pure analytic falloff (elongation from the sun +
+    // ecliptic latitude asin(dot(dir, eclipticPoleENU))), not texture-sampled, so only the pole
+    // direction is needed.
+    glm::vec3 eclipticPoleENU{0.0f, 0.0f, 1.0f};
     // Cloud tunables (CPU-side; uploaded to cloudParamsBuf each frame)
     // Defaults below are the user-tuned values baked in from settings.json (most recently
     // 2026-08-10 — cloudDensity, cloudAmbientGain, airglowCoverageGain/PolarGain, and most of the
@@ -2257,21 +2344,21 @@ private:
     // Anything here that GraphicsPreset::High also lists must change in both places at once:
     // High's table row is documented as "the compiled-in class member defaults, verbatim."
     float cloudCoverage = 1.0f;
-    float cloudDensity = 0.84f;
+    float cloudDensity = 1.3f;
     float cloudBaseAltM = 6000.0f; // layer 0 shell altitude (low cloud / stratus)
     float cloudTopAltM = 15000.0f; // layer 1 shell altitude (high cirrus)
-    float cloudDriftRate = 6.6e-06f;
-    float cloudSunGain = 4.0f;       // near-horizon/sunset sun-gain endpoint — blended toward
+    float cloudDriftRate = 6.5e-06f;
+    float cloudSunGain = 1.1f;       // near-horizon/sunset sun-gain endpoint — blended toward
                                      // cloudSunGainZenith by sun elevation (see cloud_march.comp)
     float cloudSunGainZenith = 1.0f; // sun-gain endpoint when the sun is near zenith (midday)
-    float cloudAmbientGain = 1.0f;
+    float cloudAmbientGain = 0.44f;
     float cloudTwilightAmbientGain = 0.40f; // manual gain on sky-lit cloud during twilight (was piggybacking
                                             // on cloudAmbientGain, which also drives city-light
                                             // upwelling — see kNightSkyAmbientColor in cloud_march.comp)
     float cloudBaseVariance = 0.27f;        // noise-driven cloud base height undulation, hNorm units
                                             // (0 = old perfectly flat base) — see cloudMarchCS
-    float cloudErosionEdge = 0.91f;         // cloudDensity() erosion strength at the silhouette edge
-    float sunGainElevBand = 0.12f;          // ~1.1 deg elevation band — user-tuned 2026-08-04
+    float cloudErosionEdge = 0.89f;         // cloudDensity() erosion strength at the silhouette edge
+    float sunGainElevBand = 0.02f;          // ~1.1 deg elevation band — user-tuned 2026-08-04
     // Brought forward from the original hardcoded 0.15 so the sky term overlaps the tail of
     // direct sunlight instead of starting after it; 0.35 is ~20 deg of sun elevation.
     float twilightBandHi = 0.14f;
@@ -2310,7 +2397,7 @@ private:
     // erosion instead, which does not harden thin/wispy edges the way a raw extinction multiplier
     // does. The 2026-08-15 2-s.f. rounding pass took the residual 1.014 to exactly neutral — the
     // knob is still live if it's ever needed.
-    float cloudOpacityScale = 1.0f;
+    float cloudOpacityScale = 0.46f;
     // City-lights blur-through-cloud (see GpuCloudParams::cityLightBlurLod) — mip LOD
     // earthNightTex/cityNightDetailTex blend toward under full local cloud opacity, so light
     // diffused through haze reads as a soft glow instead of a sharp copy of the raw texture.
@@ -2394,6 +2481,17 @@ private:
     float airglowSodiumGain = 0.08f;   // C15: sodium (589.3nm) band gain — kept dim relative to green
     float airglowCoverageGain = 0.32f; // patchy-coverage strength for all 3 airglow bands, [0,1]
     float airglowPolarGain = 2.4f;     // red band only: extra boost toward the geomagnetic pole
+    float zodiacalGain = 0.01f;        // master brightness multiplier for the zodiacal light cone
+    // Milky Way reflected in the ocean surface (sat_sky.frag's sky-reflection block). Small by
+    // nature: it is multiplied by reflStr (Fresnel, capped at 0.5, times exp(-dist/40000)) AND by
+    // featureReflFade (altitude + distance to the ocean point) on the way into surfColor, and the
+    // panorama's own linear luminance peaks around 0.05 — so this exists to make a faint band
+    // possible on calm near water rather than to be left at 1.0. 0 disables the reflection
+    // entirely. Was 1.6 through 2026-09-07 — dropped after the reflected band read far too bright
+    // against the real sky it mirrors.
+    float oceanMwReflGain = 0.4f;
+    float zodiacalWidthDeg = 10.0f;    // ecliptic-latitude Gaussian sigma near the sun (degrees)
+    float zodiacalOuterFadeDeg = 80.0f; // elongation at which the cone has fully faded (degrees)
     // Sun self-shadow cone (N_CONE) fades out beyond this distance. Was 22 km, when the cone
     // marched a fixed stride and distance directly bought samples. The cone now absorbs distance
     // into its stride (see cloud_march.comp's shadowFade comment), so this became a reach knob
@@ -2553,7 +2651,7 @@ private:
         KB_FASTER = 3,
         KB_REVERSE = 4,
         KB_MOVE_BOOST = 5,     // held
-        KB_MOVE_FINE = 6,      // held
+        KB_MOVE_FINE = 6,      // event — toggles fine (slow) movement mode; see fineMoveToggled
         KB_CINEMATIC = 7,      // event — toggles camera drift mode while panning
         KB_RAISE_ELEV = 8,     // Q — held — raise observer above terrain (gamepad: analog right trigger, see gpElevRaise, not this binding's gpButton)
         KB_LOWER_ELEV = 9,     // E — held — lower observer toward terrain (gamepad: analog left trigger, see gpElevLower)
@@ -2571,7 +2669,7 @@ private:
 
     // Dispatches the event-style action for keybindings[bindIdx] — shared by onKey()
     // (keyboard) and pollGamepad() (gamepad edge-detect) so the two input paths can never
-    // drift apart. No-op for held bindings (MOVE_BOOST/FINE, RAISE/LOWER_ELEV, ZOOM_IN/OUT):
+    // drift apart. No-op for held bindings (MOVE_BOOST, RAISE/LOWER_ELEV, ZOOM_IN/OUT):
     // those are polled directly, not dispatched.
     void dispatchKeyAction(int bindIdx);
 
@@ -2610,14 +2708,6 @@ private:
     // sat_sky.frag via SatDrawPC for the Milky Way. See recordCompute() for the target/easing
     // logic and rationale (asymmetric fast-dim/slow-recover rates).
     float skyGlareEased = 1.0f;
-
-    // ── Milky Way pollution suppression (hysteresis state, not persisted) ─────
-    // [0,1], 0 = fully visible, 1 = fully suppressed. Eased each frame in
-    // updateLightPollutionDome() toward a target derived from the RAW (pre-lightPollutionGain)
-    // local light-pollution level via mwPollutionThresholdLo/Hi, using mwFadeInTimeS/mwFadeOutTimeS
-    // as asymmetric rates (same shape as skyGlareEased above, see that member/recordCompute() for
-    // the pattern this mirrors). Pushed to sat_sky.frag via SatDrawPC::mwSuppressEased.
-    float mwSuppressEased = 0.0f;
 
     // ── TargetedReflector ground targets ──────────────────────────────────────
     // S1 (RELEASE_v1_1_PLAN.md): real solar-farm sites loaded from reflector_targets.json (falls
@@ -2761,6 +2851,11 @@ private:
     float cinematicPitchVel = 0.0f; // pixels-equivalent/s driving elDeg pitch
     bool cinematicActive = false;   // true last frame — used to detect transition-out
 
+    // Fine (slow) movement mode — flipped by KB_MOVE_FINE (dispatchKeyAction). A toggle rather
+    // than a held modifier (unlike KB_MOVE_BOOST): holding a stick-click down while also using
+    // that same stick to move is uncomfortable, so a single press latches slow movement on/off.
+    bool fineMoveToggled = false;
+
     // ── UI hover state (one-frame lag) ────────────────────────────────────────
     std::vector<bool> hovConst;           // one entry per constellation; sized in loadDefinitions()
     std::vector<bool> hovHighlightConst;  // highlight button hover state, parallel to hovConst
@@ -2809,13 +2904,15 @@ private:
     // Sized 11, not 9 — flare_glow_gain/flare_streak_gain (flare architecture overhaul) added two
     // more PhotoParam rows; per [[feedback_cloud_slider_arrays]], all three hover/dragging arrays
     // must grow together with any new slider id.
-    bool hovPhotoMinus[18] = {}; // 15 existing photometry params + 2 trail sliders (Trail decay/gain)
+    bool hovPhotoMinus[22] = {}; // 15 existing photometry params + 2 trail sliders (Trail decay/gain)
+                                 // + flare-mitigation tilt + the four dark-sky mags (2026-09-08)
                                  // + 1 flare-mitigation tilt (idx 17)
-    bool hovPhotoPlus[18] = {};
-    bool draggingPhoto[18] = {};
-    bool hovCloudMinus[88] = {}; // was [86] — idx 86/87 are the beam light fade in/out sliders
-    bool hovCloudPlus[88] = {};
-    bool draggingCloud[88] = {}; // MUST stay sized to match hovCloudMinus/Plus — see
+    bool hovPhotoPlus[22] = {};
+    bool draggingPhoto[22] = {};
+    bool hovCloudMinus[91] = {}; // was [88] — idx 88/89 are the zodiacal light gain/width sliders,
+                                 // idx 90 the ocean Milky Way reflection gain (2026-09-08)
+    bool hovCloudPlus[91] = {};
+    bool draggingCloud[91] = {}; // MUST stay sized to match hovCloudMinus/Plus — see
                                  // feedback_cloud_slider_arrays memory: this one was missed once
                                  // already and the out-of-bounds write corrupted the window-chrome
                                  // state declared right below, breaking the settings window.
@@ -2948,7 +3045,9 @@ private:
                                                                                 // pickSatelliteAt but reads the already host-mapped
                                                                                 // planetBuf directly — no device->host staging copy
     void formatSelectedPlanetInfo();                                            // mirrors formatSelectedSatInfo, fills planetInfoLine[]
-    void updateLightPollutionDome();                                            // called each frame before updateStars(): fills lightDomeAz[]
+    void updateLightPollutionDome(float dt);                                    // called each frame before updateStars(): fills lightDomeAz[]
+    void easeDarkSkyDome(float dt, const float *rawSectors);                    // log-maps + eases lightDomeEasedAz[] (nullptr = pristine)
+    void uploadLightDome();                                                     // memcpys both dome halves into lightDomeBuf
                                                                                 // + uploads to lightDomeBuf for sat_flare.comp
     void updateGpuTimingStats(VulkanContext &ctx);                              // called at top of recordCompute(): EMA-smooths
                                                                                 // ctx.timestampMs into gpuMsSmoothed[]/gpuMsTotalSmoothed

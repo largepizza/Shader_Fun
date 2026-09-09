@@ -60,9 +60,6 @@ layout(push_constant) uniform PC {
     float manualTerrainTest;  // offset 124 — 1 = do the manual sceneDepthTex hit-test below
 } pc;
 
-const float kNoSurfaceT = 1e30; // mirrors common.glsl's constant — this shader skips the #include
-                                 // machinery for a single value, same idiom flare_source.frag uses
-
 void main() {
 
     vec2  c = gl_PointCoord - 0.5;
@@ -106,18 +103,21 @@ void main() {
     const float kStarCloudSuppressPower = 2.0;
     float cloudVis = cloudHardOcclude * pow(clamp(cloudBlock, 0.0, 1.0), kStarCloudSuppressPower);
 
-    // ── Terrain occlusion (long-exposure trail follow-up) ──────────────────────
-    // Only the trail draw sets this — the live draw already gets terrain occlusion for free from
-    // the main render pass's hardware depth test (this pipeline is drawn at a fixed depth of 0.5,
-    // which loses against any real terrain hit and wins against pure sky). The trail's offscreen
-    // render pass has no depth attachment at all, so it needs this explicit test instead — same
-    // technique flare_source.frag/sat_point.frag already use for the same reason: any real
-    // terrain/ocean hit along this screen ray occludes a star, regardless of how far away that hit
-    // actually is (stars have no real depth of their own to compare against).
+    // ── Terrain occlusion ─────────────────────────────────────────────────────
+    // Set by (a) the long-exposure trail draw, whose offscreen render pass has no depth attachment,
+    // and (b) the live draw at renderScale < 1.0, where the sky pass is a low-res prepass that never
+    // writes the frame's depth buffer (see buildPointDrawPC). At renderScale 1.0 the live draw
+    // instead gets this for free from the hardware depth test against sat_sky.frag's gl_FragDepth.
+    //
+    // kOcclusionCap MUST match sat_sky.frag's constant of the same name — that shader only writes a
+    // point-occluding depth for terrain/ocean within this distance, so this test reproduces its
+    // exact behaviour (including the same limitation: a surface farther than the cap does not
+    // occlude, which for a point source at infinity is visible only in orbital views).
     float terrainVis = 1.0;
     if (pc.manualTerrainTest >= 0.5) {
         vec2 depthUV = gl_FragCoord.xy / pc.screenSizePx;
-        terrainVis = (texture(sceneDepthTex, depthUV).r >= kNoSurfaceT * 0.5) ? 1.0 : 0.0;
+        const float kOcclusionCap = 150000.0;
+        terrainVis = (texture(sceneDepthTex, depthUV).r < kOcclusionCap) ? 0.0 : 1.0;
     }
 
     float brightness = gaussian * coreScale * fragTwinkle * cloudVis * terrainVis;

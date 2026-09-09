@@ -313,11 +313,55 @@ layout(set = 0, binding = CLOUD_PARAMS_BINDING) uniform CloudParams {
     float beamSkyGlowGain;
     float beamGlowBleedGain;
     float beamProximityGlow;
-    float mwSuppressEased;
+    // Sky background surface brightness (mag/arcsec^2, larger = fainter) that the light-pollution
+    // dome asymptotes to at the mwPollutionThresholdHi end of its range — the "inner city" end of
+    // the dark-sky exposure gate in darksky.glsl. ~18.0 is a real Bortle 8-9 zenith. Reuses the
+    // slot that carried mwSuppressEased, the single non-directional Milky Way suppression scalar
+    // that gate replaced (same offset, so the C++ mirror's layout is unchanged).
+    float darkSkyCityMag;
     float cloudShadowRangeM;
     float skyScreenW;        // sat_sky.frag render-target size (low-res prepass or full-res); any
     float skyScreenH;        // gl_FragCoord-derived [0,1] UV in that shader divides by this
-    float pad21;
-    float pad22;
-    float pad23;
+    // ── Zodiacal light (532 -> 560) ──────────────────────────────────────────────────────────
+    // zodiacalWidthDeg: ecliptic-latitude Gaussian sigma near the sun. zodiacalOuterFadeDeg:
+    // elongation at which the cone has faded out. eclipticPoleENU.xyz is a CPU-computed
+    // (updatePositions(), mirrors the Milky Way's mwBasisRow0-2 idiom) ENU-frame unit vector
+    // toward the ecliptic north pole — NOT a full lon/lat basis like the Milky Way's, since
+    // zodiacal light is a pure analytic falloff (elongation from the sun + ecliptic latitude),
+    // not texture-sampled, so it only ever needs the latitude term:
+    // asin(dot(dir, eclipticPoleENU.xyz)). eclipticPoleENU.w = zodiacalGain, the master gain.
+    //
+    // These claimed pad21/pad22 on the zodiacal-light branch, where they landed at 488/492 and
+    // put the vec4 at 496. After the push-constant relief block above they sit at 532/536, which
+    // leaves the next free offset at 540 — NOT 16-byte aligned. pad21 below is therefore
+    // LOAD-BEARING, not filler: std140 would align eclipticPoleENU up to 544 while C++ (glm::vec4
+    // is 4-aligned by default, no GLM_FORCE_ALIGNED_GENTYPES here) would pack it at 540, and
+    // every field from there on would read its neighbour's bytes. Same permutation hazard this
+    // header's own header comment describes. Keep the pad, and keep GpuCloudParams identical.
+    float zodiacalWidthDeg;
+    float zodiacalOuterFadeDeg;
+    float pad21;             // alignment for the vec4 below — see above, do not reuse
+    vec4  eclipticPoleENU;   // xyz = ENU dir to ecliptic north pole, w = zodiacalGain
+    // ── Dark-sky twilight term (560 -> 576) ──────────────────────────────────────────────────
+    // Sun's own contribution to sky background brightness, for the dark-sky exposure gate in
+    // darksky.glsl. Before this, the ONLY solar gate on the Milky Way was nightFactorEffSky's
+    // clamp(-sunDirENU.w * 5, 0, 1), which saturates at sin(el) = -0.2 — i.e. it stops suppressing
+    // anything once the sun is a mere 11.5 deg below the horizon, less than the end of NAUTICAL
+    // twilight. So the Milky Way appeared at full strength while the sky was still visibly bright.
+    // It was also completely non-directional, which is the bigger error: real twilight is an arch
+    // low on the sun's side of the sky while the antisolar sky is already dark, so the Milky Way
+    // should emerge from the east first, not everywhere at once.
+    //
+    // Appended (not slotted into an existing pad) per this header's own guidance. 3 fields + pad23:
+    // std140 rounds the block up to a 16-byte multiple while C++ would pack it at 572, so the pad
+    // is LOAD-BEARING exactly like pad21 above. Do not reuse it.
+    float darkSkyTwilightMag0;   // sky surface brightness with the sun ON the horizon (mag/arcsec^2)
+    float darkSkyTwilightEndDeg; // solar depression at which the sky reaches pristine (18 = the real
+                                 // end of astronomical twilight); the single best "how long after
+                                 // sunset does the Milky Way come out" knob
+    float darkSkyTwilightAniso;  // magnitudes the ANTISOLAR sky is darker than the solar side
+    float oceanMwReflGain;       // gain on the Milky Way's reflection in the ocean surface
+                                 // (sat_sky.frag). Claimed the alignment pad this block was
+                                 // appended with — a real float either way, so the 16-byte
+                                 // rounding it exists for is unchanged.
 } cloud;

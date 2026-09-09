@@ -275,7 +275,7 @@ void SatelliteSim::init(VulkanContext &ctx)
         {"Speed Up", GLFW_KEY_PERIOD, GLFW_GAMEPAD_BUTTON_DPAD_RIGHT, false, false},        // KB_FASTER
         {"Reverse Time", GLFW_KEY_R, GLFW_GAMEPAD_BUTTON_DPAD_UP, false, false},            // KB_REVERSE
         {"Move Fast", GLFW_KEY_LEFT_SHIFT, GLFW_GAMEPAD_BUTTON_LEFT_THUMB, true, false},    // KB_MOVE_BOOST (held)
-        {"Move Fine", GLFW_KEY_LEFT_CONTROL, GLFW_GAMEPAD_BUTTON_RIGHT_THUMB, true, false}, // KB_MOVE_FINE  (held)
+        {"Move Fine", GLFW_KEY_LEFT_CONTROL, GLFW_GAMEPAD_BUTTON_RIGHT_THUMB, false, false}, // KB_MOVE_FINE  (event, toggle)
         {"Cinematic Pan", GLFW_KEY_LEFT_ALT, -1, false, false},                             // KB_CINEMATIC  (event, toggle)
         {"Raise Elevation", GLFW_KEY_Q, -1, true, false},                                   // KB_RAISE_ELEV (held) — gamepad is the analog right trigger, see gpElevRaise
         {"Lower Elevation", GLFW_KEY_E, -1, true, false},                                   // KB_LOWER_ELEV (held) — gamepad is the analog left trigger, see gpElevLower
@@ -986,7 +986,7 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
     if ((!showIntro || introCaptionIndex >= kIntroControlsIndex) && win)
     {
         bool boost = (win && glfwGetKey(win, keybindings[KB_MOVE_BOOST].key) == GLFW_PRESS) || gpHeld(KB_MOVE_BOOST);
-        bool fine = (win && glfwGetKey(win, keybindings[KB_MOVE_FINE].key) == GLFW_PRESS) || gpHeld(KB_MOVE_FINE);
+        bool fine = fineMoveToggled; // latched by KB_MOVE_FINE (dispatchKeyAction), not held
         float speed = boost ? 0.5f : fine ? 0.005f
                                           : 0.08f; // boost = fast, fine = slow, default = normal
 
@@ -1099,7 +1099,23 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
         // observer's actual position, so this tracks a real eclipse/shadow crossing reasonably
         // well without a separate Earth-shadow ray test).
         bool sunlit = sunDirENU.w > 0.0f;
-        float glareTarget = sunOnScreen ? 0.0f : (sunlit ? sunlitBgVisibility : 1.0f);
+
+        // sunOnScreen above is a pure camera-frustum/projection test on sunDirENU — it has no
+        // notion of what actually lies along that line of sight, so it fired glare even when the
+        // sun's disc is fully hidden behind the Earth's own limb (e.g. on the night side, looking
+        // toward the direction the sun geometrically sits in but Earth's curvature blocks it).
+        // Gate it with the same spherical-horizon test the sun disc's own visibility already uses
+        // in sat_sky.frag (limbZ): the sun is below the geometric horizon — and therefore
+        // Earth-occluded — once its elevation sine (sunDirENU.w) drops below
+        // -sqrt(1-(R_EARTH/obsR)^2), which grows more negative with altitude, so a high-orbit
+        // observer correctly keeps "seeing" (and being glared by) the sun well past local sunset.
+        float obsRForLimb = glm::length(obsECI);
+        float limbZCpu = (obsRForLimb > kEarthRadius)
+                              ? -sqrtf(std::max(0.0f, 1.0f - (kEarthRadius / obsRForLimb) * (kEarthRadius / obsRForLimb)))
+                              : 0.0f;
+        bool sunOccludedByEarth = sunDirENU.w < limbZCpu;
+
+        float glareTarget = (sunOnScreen && !sunOccludedByEarth) ? 0.0f : (sunlit ? sunlitBgVisibility : 1.0f);
 
         // Asymmetric hysteresis: glare hits fast (sensor/eyes overwhelmed almost immediately),
         // recovery is slow (night-vision-style readaptation) — avoids an instant on/off pop
@@ -1112,21 +1128,13 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
 
     {
         CpuTimer _t(cpuAccumMs[CPU_LIGHT_DOME]);
-        updateLightPollutionDome();
-
-        // Milky Way pollution hysteresis — same asymmetric-rate pattern as skyGlareEased above
-        // (target computed instantly, eased toward it at a rate that differs by direction), but
-        // driven by mwPollutionRaw (updateLightPollutionDome()'s pre-gain local pollution level)
-        // against its own mwPollutionThresholdLo/Hi band, not the shared domeVal/lightPollutionGain
-        // stars and satellites use. Hand-rolled smoothstep — no glm::smoothstep used elsewhere in
-        // this file (see the beamProximityGlow comment above for the same convention).
-        float mwX = glm::clamp((mwPollutionRaw - mwPollutionThresholdLo)
-                                    / std::max(mwPollutionThresholdHi - mwPollutionThresholdLo, 1e-5f),
-                                0.0f, 1.0f);
-        float mwTarget = mwX * mwX * (3.0f - 2.0f * mwX); // 0 = fully visible, 1 = fully suppressed
-        float mwRate = (mwTarget > mwSuppressEased) ? (1.0f / std::max(mwFadeOutTimeS, 0.01f))
-                                                      : (1.0f / std::max(mwFadeInTimeS, 0.01f));
-        mwSuppressEased = glm::mix(mwSuppressEased, mwTarget, 1.0f - expf(-dt * mwRate));
+        // dt: the dark-sky dome half (lightDomeEasedAz[]) is temporally eased in here now. That
+        // easing used to be a separate step at this call site operating on mwSuppressEased, a
+        // single MAX-over-all-sectors scalar — which is exactly what made the Milky Way read as
+        // on/off and made a city in ONE direction suppress the whole sky. Easing the per-sector
+        // dome instead keeps the hysteresis (flying over a city edge still doesn't pop) while
+        // leaving the direction information intact for darkSkySkyMag() to use.
+        updateLightPollutionDome(dt);
     }
     {
         CpuTimer _t(cpuAccumMs[CPU_UPDATE_STARS]);
@@ -1835,7 +1843,7 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
         cp.airglowPolarGain = airglowPolarGain;
         // ── Push-constant relief: ex-SatDrawPC / ex-CloudMarchPC fields (see GpuCloudParams) ──
         // All per-frame-uniform; moved off the push constants so both ranges fit the 128-byte
-        // maxPushConstantsSize floor. skyGlareEased / mwSuppressEased / beamProximityGlow are all
+        // maxPushConstantsSize floor. skyGlareEased / beamProximityGlow are both
         // updated earlier in this same recordCompute() call, before this fill.
         cp.dbgDisableMask = debugDisableMask;
         cp.showBeamDebugRays = showBeamDebugRays ? 1u : 0u;
@@ -1844,13 +1852,22 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
         cp.beamSkyGlowGain = beamSkyGlowGain;
         cp.beamGlowBleedGain = beamGlowBleedGain;
         cp.beamProximityGlow = beamProximityGlow;
-        cp.mwSuppressEased = mwSuppressEased;
+        cp.darkSkyCityMag = darkSkyCityMag;
+        cp.darkSkyTwilightMag0 = darkSkyTwilightMag0;
+        cp.darkSkyTwilightEndDeg = darkSkyTwilightEndDeg;
+        cp.darkSkyTwilightAniso = darkSkyTwilightAniso;
+        cp.oceanMwReflGain = oceanMwReflGain;
         cp.cloudShadowRangeM = cloudShadowRangeM;
         // sat_sky.frag's render target: the low-res prepass extent when renderScale<1 (recordPrePass
         // draws the sky there and recordDraw's Pass 1 is skipped), else the full swap extent. The
         // point shaders don't read these — they carry their own always-full-res screenSizePx.
         cp.skyScreenW = (renderScale < 0.999f) ? (float)skyLowResExtent.width : (float)ctx.swapExtent.width;
         cp.skyScreenH = (renderScale < 0.999f) ? (float)skyLowResExtent.height : (float)ctx.swapExtent.height;
+        // Zodiacal light (see GpuCloudParams / cloud_params.glsl). eclipticPoleENU is
+        // recomputed each frame in updatePositions(), alongside the Milky Way basis.
+        cp.zodiacalWidthDeg = zodiacalWidthDeg;
+        cp.zodiacalOuterFadeDeg = zodiacalOuterFadeDeg;
+        cp.eclipticPoleENU = glm::vec4(eclipticPoleENU, zodiacalGain); // .w = zodiacalGain
         cp.shadowMaxDistM = cloudShadowMaxDistM;
         cp.maxRenderDistM = cloudMaxRenderDistM;
         cp.viewSamplesMin = viewSamplesMin;
@@ -2850,7 +2867,19 @@ PointDrawPC SatelliteSim::buildPointDrawPC(VulkanContext &ctx)
     pc.obsECEFDir = glm::vec4(obsDir, obsHeightOffset);
     pc.screenSizePx = glm::vec2((float)ctx.swapExtent.width, (float)ctx.swapExtent.height);
     pc.debugDisableMask = debugDisableMask;
-    pc.manualTerrainTest = 0.0f;
+    // Terrain occlusion for the LIVE satellite/star/planet draws normally comes for free from the
+    // main render pass's hardware depth test against the depth the sky pass wrote. But at
+    // renderScale < 1.0 the sky pass is a low-res offscreen prepass that never writes into the
+    // frame's depth attachment (depth is deliberately not blitted — see the resolution-scaling
+    // member comment in SatelliteSim.h), so that hardware test has nothing to test against and
+    // satellites/stars show through terrain — visible on Medium (0.85) but not High (1.0). Fall
+    // back to the same explicit sceneDepthTex hit-test the trail draws already use in that case.
+    // scene_depth.comp runs regardless of renderScale, so the buffer is always valid; if its
+    // knockout (bit 1024) is set the buffer is all kNoSurfaceT and the test is a safe no-op anyway,
+    // but skip the fetch entirely then.
+    bool scaledPrepass = renderScale < 0.999f;
+    bool sceneDepthLive = (debugDisableMask & 1024u) == 0u;
+    pc.manualTerrainTest = (scaledPrepass && sceneDepthLive) ? 1.0f : 0.0f;
     return pc;
 }
 
@@ -3893,6 +3922,9 @@ void SatelliteSim::dispatchKeyAction(int bindIdx)
     case KB_REVERSE:
         toggleTimeDirection();
         break;
+    case KB_MOVE_FINE:
+        fineMoveToggled = !fineMoveToggled;
+        break;
     case KB_CINEMATIC:
         // Mouse-drag-flavored feature (RMB capture is required to mean anything); gated
         // the same way regardless of whether the press came from a key or a gamepad button.
@@ -3958,7 +3990,7 @@ void SatelliteSim::dispatchKeyAction(int bindIdx)
             trailClearPending = true;
         break;
     default:
-        break; // KB_MOVE_BOOST/FINE, KB_RAISE_ELEV/LOWER_ELEV, KB_ZOOM_IN/OUT are held keys — polled directly.
+        break; // KB_MOVE_BOOST, KB_RAISE_ELEV/LOWER_ELEV, KB_ZOOM_IN/OUT are held keys — polled directly.
     }
 }
 
@@ -4064,12 +4096,15 @@ void SatelliteSim::createBuffers(VulkanContext &ctx)
                      satVisibleBuf, satVisibleMem);
 
     // lightDomeBuf: host-visible, updated each frame by updateLightPollutionDome().
-    ctx.createBuffer(sizeof(float) * kNumLightSectors,
+    // 2 * kNumLightSectors: [0,16) = lightDomeAz (gain-scaled linear, satellites/stars),
+    // [16,32) = lightDomeEasedAz (normalized + eased, the dark-sky exposure gate). sat_flare.comp
+    // declares only the first half and is unaffected — trailing SSBO storage is simply not read.
+    ctx.createBuffer(sizeof(float) * kNumLightSectors * 2,
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                      lightDomeBuf, lightDomeMem);
-    vkMapMemory(ctx.device, lightDomeMem, 0, sizeof(float) * kNumLightSectors, 0, &lightDomeMapped);
-    memset(lightDomeMapped, 0, sizeof(float) * kNumLightSectors);
+    vkMapMemory(ctx.device, lightDomeMem, 0, sizeof(float) * kNumLightSectors * 2, 0, &lightDomeMapped);
+    memset(lightDomeMapped, 0, sizeof(float) * kNumLightSectors * 2);
 
     // satOrbitBuf: device-local, uploaded once. sat_orbit.comp reads every frame.
     ctx.createBuffer(sizeof(GpuSatOrbit) * MAX_SATELLITES,
@@ -7692,7 +7727,7 @@ void SatelliteSim::createStarPipeline(VulkanContext &ctx)
 // existing 8-sector azBin in sat_flare.comp exactly (bearing clockwise from North, 45° each)
 // so both consumers read consistent geometry. Uploaded to lightDomeBuf for sat_flare.comp;
 // updateStars() (called right after this) reads lightDomeAz[] directly, no upload needed there.
-void SatelliteSim::updateLightPollutionDome()
+void SatelliteSim::updateLightPollutionDome(float dt)
 {
     float obsR = glm::length(obsECI);
     float obsHeight = obsR - kEarthRadius;
@@ -7705,8 +7740,12 @@ void SatelliteSim::updateLightPollutionDome()
     {
         for (int i = 0; i < kNumLightSectors; ++i)
             lightDomeAz[i] = 0.0f;
-        memcpy(lightDomeMapped, lightDomeAz, sizeof(lightDomeAz));
-        mwPollutionRaw = 0.0f; // no data (or above the skyglow altitude falloff) — reads as "dark"
+        // No data, or above the altitude at which skyglow reaches the observer at all — the sky is
+        // pristine in every direction. Still routed through the easing rather than snapped to 0:
+        // "ascending into space" is one of the two cases mwFadeInTimeS was written for (see that
+        // member), and it is the case where a snap would be most obvious.
+        easeDarkSkyDome(dt, nullptr);
+        uploadLightDome();
         return;
     }
 
@@ -7760,10 +7799,13 @@ void SatelliteSim::updateLightPollutionDome()
     float obsLonRad = glm::radians(obsLonDeg);
     float cosObsLat = std::max(0.05f, cosf(obsLatRad)); // guard near the poles
 
-    float mwRawMax = 0.0f; // max cityBrightness*altFalloff across sectors, BEFORE lightPollutionGain
-                            // — feeds the Milky Way's own threshold (mwPollutionThresholdLo/Hi),
-                            // deliberately independent of the gain slider that scales lightDomeAz[]
-                            // for stars/satellites below.
+    // Per-sector RAW (pre-lightPollutionGain) city brightness, kept alongside the gained
+    // lightDomeAz[] below. This was a single mwRawMax — the MAX across every sector — which is
+    // precisely what made a city on one horizon suppress the Milky Way in the opposite, darkest
+    // part of the sky. Keeping it per-sector is the whole directional fix; it feeds the dark-sky
+    // exposure gate through mwPollutionThresholdLo/Hi, still deliberately independent of the gain
+    // slider that scales lightDomeAz[] for stars/satellites.
+    float rawAz[kNumLightSectors];
     for (int sec = 0; sec < kNumLightSectors; ++sec)
     {
         float bearing = (float(sec) + 0.5f) * (2.0f * glm::pi<float>() / float(kNumLightSectors));
@@ -7798,9 +7840,8 @@ void SatelliteSim::updateLightPollutionDome()
         // gain=500 read identically to gain=5. Leaving this unclamped lets high gain compensate
         // for elevFalloff's reduction; the final domeVal clamp downstream still bounds the result.
         lightDomeAz[sec] = cityBrightness * altFalloff * lightPollutionGain;
-        mwRawMax = std::max(mwRawMax, cityBrightness * altFalloff);
+        rawAz[sec] = cityBrightness * altFalloff;
     }
-    mwPollutionRaw = mwRawMax;
 
     // Circular smoothing pass (session 26 follow-up): each sector is a single bearing ray, so a
     // real city's edge — which doesn't line up with 22.5° sector boundaries — can put a bright
@@ -7811,20 +7852,77 @@ void SatelliteSim::updateLightPollutionDome()
     // sampling noise. 5-tap blur (~±45°) trades a little directional sharpness for removing that
     // noise while keeping the broad "city here, dark ocean there" structure intact.
     float smoothed[kNumLightSectors];
+    float smoothedRaw[kNumLightSectors];
     const float kBlurWeights[5] = {0.1f, 0.2f, 0.4f, 0.2f, 0.1f};
     for (int i = 0; i < kNumLightSectors; ++i)
     {
-        float acc = 0.0f;
+        float acc = 0.0f, accRaw = 0.0f;
         for (int k = -2; k <= 2; ++k)
         {
             int idx = ((i + k) % kNumLightSectors + kNumLightSectors) % kNumLightSectors;
             acc += lightDomeAz[idx] * kBlurWeights[k + 2];
+            // rawAz gets the identical blur, for the identical reason — it is sampled along the
+            // same single bearing ray per sector and carries the same edge noise. Applied here, to
+            // the raw brightness, rather than after the log-map in easeDarkSkyDome: the log-map is
+            // non-linear so the two are NOT equivalent, and this is the order the blur was
+            // designed for (it smooths a physical city-brightness signal, and it keeps both dome
+            // halves derived from the same smoothed numbers).
+            accRaw += rawAz[idx] * kBlurWeights[k + 2];
         }
         smoothed[i] = acc;
+        smoothedRaw[i] = accRaw;
     }
     memcpy(lightDomeAz, smoothed, sizeof(smoothed));
 
+    easeDarkSkyDome(dt, smoothedRaw);
+    uploadLightDome();
+}
+
+// ─── easeDarkSkyDome ─────────────────────────────────────────────────────────
+// Log-maps each sector's raw (pre-lightPollutionGain) city brightness onto the normalized [0,1]
+// "pristine -> inner city" axis the dark-sky exposure gate reads, then eases toward it with the
+// same asymmetric 1 - exp(-dt/tau) idiom skyGlareEased uses.
+//
+// Logarithmic because the consumer works in magnitudes (shaders/include/darksky.glsl): the raw
+// signal spans orders of magnitude and a linear ramp across mwPollutionThresholdLo/Hi would spend
+// almost all of its range on the brightest handful of sectors. mwPollutionThresholdLo/Hi keep
+// their tuned values and still bracket the same transition — see their member comments for what
+// changed about their meaning.
+//
+// rawSectors == nullptr means "no pollution data at all in any direction" (no night texture, or
+// the observer is above the altitude skyglow reaches) — target 0, i.e. pristine, still eased.
+void SatelliteSim::easeDarkSkyDome(float dt, const float *rawSectors)
+{
+    float loS = std::max(mwPollutionThresholdLo, 1e-6f);
+    float hiS = std::max(mwPollutionThresholdHi, loS * 1.001f);
+    float invLogRange = 1.0f / std::log(hiS / loS);
+
+    for (int i = 0; i < kNumLightSectors; ++i)
+    {
+        float target = 0.0f;
+        if (rawSectors)
+            target = glm::clamp(std::log(std::max(rawSectors[i], loS) / loS) * invLogRange, 0.0f, 1.0f);
+
+        // Asymmetric, same convention as mwSuppressEased had: "fade in" is the direction that
+        // makes features MORE visible (pollution dropping, target falling), "fade out" the
+        // direction that hides them. Preserves what those two sliders meant to a user who has
+        // already tuned them, even though the quantity being eased is now the dome itself.
+        float rate = (target > lightDomeEasedAz[i]) ? (1.0f / std::max(mwFadeOutTimeS, 0.01f))
+                                                    : (1.0f / std::max(mwFadeInTimeS, 0.01f));
+        lightDomeEasedAz[i] = glm::mix(lightDomeEasedAz[i], target, 1.0f - std::exp(-dt * rate));
+    }
+}
+
+// ─── uploadLightDome ─────────────────────────────────────────────────────────
+// Both halves of lightDomeBuf in one shot: [0,16) the gain-scaled linear dome (satellites via
+// sat_flare.comp), [16,32) the normalized+eased dark-sky dome (Milky Way/zodiacal in
+// sat_sky.frag, aurora in cloud_march.comp). updateStars() reads lightDomeAz[] from the CPU array
+// directly and needs no upload.
+void SatelliteSim::uploadLightDome()
+{
     memcpy(lightDomeMapped, lightDomeAz, sizeof(lightDomeAz));
+    memcpy(static_cast<char *>(lightDomeMapped) + sizeof(lightDomeAz),
+           lightDomeEasedAz, sizeof(lightDomeEasedAz));
 }
 
 // ─── updateStars ──────────────────────────────────────────────────────────────
@@ -8915,6 +9013,17 @@ void SatelliteSim::updatePositions(double t, float dt)
         glm::dot(sunDirECI, north),
         glm::dot(sunDirECI, up)};
     sunDirENU = glm::vec4(glm::normalize(sunENU), sunENU.z); // w = sin(elevation)
+
+    // ── Ecliptic pole in ENU, for zodiacal light ──────────────────────────────
+    // Ecliptic north pole (0,0,1) rotated into this same equatorial ECI frame by the identical
+    // obliquity rotation the Moon calc below applies (X unchanged, Y/Z rotated by epsR about X) —
+    // with ecliptic Y=Z=0 that reduces to (0, -sin(epsR), cos(epsR)). Projected into ENU the same
+    // way the Milky Way basis above is, so the shader only needs one dot product for ecliptic
+    // latitude (asin(dot(dir, eclipticPoleENU))) — no full lon/lat basis needed, since zodiacal
+    // light is a pure analytic falloff, not texture-sampled.
+    glm::vec3 eclPoleECI{0.0f, -(float)sin(epsR), (float)cos(epsR)};
+    eclipticPoleENU = glm::normalize(glm::vec3(
+        glm::dot(eclPoleECI, east), glm::dot(eclPoleECI, north), glm::dot(eclPoleECI, up)));
 
     // ── Moon direction in ECI (Keplerian two-body ellipse — see kMoonElements) ───────────────
     // Was a circular equatorial orbit with a phase constant hand-calibrated for one epoch

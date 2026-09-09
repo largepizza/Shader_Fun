@@ -64,6 +64,7 @@ layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D targetB;
 // descriptor sets, same underlying resources).
 layout(std430, set = 0, binding = 7) readonly buffer LightDomeBuf {
     float lightDome[16];
+    float lightDomeEased[16];   // dark-sky dome half — see sat_sky.frag's copy / uploadLightDome()
 };
 layout(set = 0, binding = 8) uniform sampler3D auroraNoiseTex;
 // Baked cloud/cirrus domain-warp field (see cloud_warp_noise.comp) — replaces the 3 live
@@ -105,6 +106,7 @@ layout(set = 0, binding = 13) uniform sampler2D sceneDepthTex;
 // kElevOffsetBeam were a local re-declaration of exactly kElevRange / kElevOffset.
 #include "common.glsl"
 #include "terrain.glsl"
+#include "darksky.glsl"   // dark-sky exposure gate (aurora)
 
 // Terrain height (m above sea level) at an ECEF-frame direction. Thin wrapper binding this
 // shader's own earthElevTex/earthSpecTex to the shared decode, so the caller below is unchanged.
@@ -547,27 +549,38 @@ vec3 auroraMarchCS(vec3 obsPos, vec3 dir, vec3 enuX, vec3 enuY, vec3 enuZ,
     if (nearValid) accumAurora += auroraMarchSegment(obsPos, dir, enuX, enuY, enuZ, sunDirECEF, atEnter, atExit);
     if (farValid)  accumAurora += auroraMarchSegment(obsPos, dir, enuX, enuY, enuZ, sunDirECEF, farEnter, farExit);
 
-    // Light pollution + moonlight suppression — identical formula to sat_sky.frag's copy.
-    float azLPAurora    = mod(atan(dir.x, dir.y) + 6.283185307, 6.283185307);
-    float secFAurora    = azLPAurora * (16.0 / 6.283185307) - 0.5;
-    int   sec0Aurora    = int(floor(secFAurora));
-    float secFracAurora = secFAurora - float(sec0Aurora);
-    int   sec0wAurora   = ((sec0Aurora % 16) + 16) % 16;
-    int   sec1wAurora   = (sec0wAurora + 1) % 16;
-    float domeAzAurora  = mix(lightDome[sec0wAurora], lightDome[sec1wAurora], secFracAurora);
-    float elevFalloffAurora = 0.35 / (max(dir.z, 0.0) + 0.35);
-    // S2c (RELEASE_v1_1_PLAN.md): same isotropic-floor fix as sat_flare.comp/sat_sky.frag/
-    // updateStars() — elevFalloffAurora alone bottoms out at ~0.26 at zenith, wrong for real
-    // (isotropically-scattered) urban skyglow. Keep this constant identical across all copies.
-    const float kIsotropicFrac = 0.4;
-    float domeValAurora  = clamp(domeAzAurora * (kIsotropicFrac + (1.0 - kIsotropicFrac) * elevFalloffAurora), 0.0, 1.0);
-    const float kAuroraPollutionMaxDim = 0.9;
+    // Light pollution: the shared dark-sky exposure gate (darksky.glsl), same model and same eased
+    // dome half the Milky Way and zodiacal light use in sat_sky.frag — replacing the old
+    // (1 - domeValAurora * 0.9) linear dim with its own hand-tuned ceiling. The isotropic-floor
+    // shape it used to apply here now lives inside darkSkySkyMag().
+    //
+    // Per-sample like the other two, and the gain is real: a bright active curtain and a faint
+    // diffuse arc are wildly different surface brightnesses, so the strong display correctly
+    // punches through suburban skyglow while the faint one washes out — where a single multiplier
+    // dimmed both by the same fraction and neither ever quite disappeared.
+    //
+    // Anchor: accumAurora at this point is already scaled by kAuroraScale * cloud.auroraGain, so
+    // it is the radiance actually composited into the sky. 0.02 -> 19.5 mag/arcsec^2 places a
+    // bright curtain well above the Milky Way's core, which is right — aurora is the one feature
+    // here that a city dweller genuinely can see. THIS IS THE ONE CONSTANT IN THIS CHANGE NOT
+    // CALIBRATED AGAINST MEASURED DATA (the Milky Way's came from the panorama's own histogram,
+    // zodiacal's from its known peak gain); accumAurora's typical magnitude can only be read off
+    // in-app. If aurora reads too faint under light pollution, lower kAuroraRefLum; too strong,
+    // raise it.
+    float auroraSkyBgMag = darkSkySkyMag(dir, pc.sunDirENU);
+
+    const float kAuroraRefLum    = 0.02;
+    const float kAuroraRefMag    = 19.5;
+    const float kAuroraMagSpread = 0.85;
+    vec3  auroraScaled = accumAurora * kAuroraScale * cloud.auroraGain;
+    float auroraLum    = dot(auroraScaled, vec3(0.2126, 0.7152, 0.0722));
+    float auroraObjMag = darkSkySurfMag(auroraLum, kAuroraRefLum, kAuroraRefMag, kAuroraMagSpread);
 
     float tmAurora         = clamp(moonDirENU.z / 0.5, 0.0, 1.0);
     float moonBrightAurora = tmAurora * tmAurora * moonDirENU.w;
     const float kAuroraMoonMaxDim = 0.85;
 
-    float auroraVisSuppress = (1.0 - domeValAurora * kAuroraPollutionMaxDim)
+    float auroraVisSuppress = darkSkyVis(auroraObjMag, auroraSkyBgMag)
                              * (1.0 - moonBrightAurora * kAuroraMoonMaxDim);
 
     // Atmospheric extinction — same Kasten & Young 1989 approximation as sat_sky.frag's copy.
@@ -583,8 +596,10 @@ vec3 auroraMarchCS(vec3 obsPos, vec3 dir, vec3 enuX, vec3 enuY, vec3 enuZ,
     float extinctionAurora = pow(10.0, -0.4 * extinctMagAurora);
 
     // accumAurora is already integrated (each auroraMarchSegment call scales by its own step
-    // length) — do not multiply by a step length again here.
-    return accumAurora * kAuroraScale * cloud.auroraGain * auroraVisSuppress * extinctionAurora;
+    // length) — do not multiply by a step length again here. auroraScaled is that same
+    // kAuroraScale * auroraGain product, computed above because the exposure gate needs the
+    // composited radiance to judge the curtain's surface brightness.
+    return auroraScaled * auroraVisSuppress * extinctionAurora;
 }
 
 // Airglow red band (630nm) supplemental march — moved here from sat_sky.frag this session (perf:

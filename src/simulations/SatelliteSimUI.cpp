@@ -2517,7 +2517,7 @@ void SatelliteSim::buildSettingsPhotometryTab(const UIInput &inp, UIRenderer &ui
         const char *fmt;
         int idx;
     };
-    static char photoBufs[18][12];
+    static char photoBufs[22][12];
     PhotoParam photoParams[] = {
         {"Brightness", &brightnessScale, 0.05f, 20.0f, 0.25f, "%.2f", 0},
         {"Day suppress", &daySuppression, 5.0f, 5000.0f, 5.0f, "%.0f", 1},
@@ -2532,24 +2532,36 @@ void SatelliteSim::buildSettingsPhotometryTab(const UIInput &inp, UIRenderer &ui
         // render-to-texture + blur/streak pipeline (see FlareSourcePC's comment in SatelliteSim.h).
         {"Flare glow gain", &flareGlowGain, 0.0f, 0.01f, 0.0005f, "%.2f", 9},
         {"Flare streak", &flareStreakGain, 0.0f, 1.0f, 0.02f, "%.2f", 10},
-        // Milky Way's own light-pollution threshold + fade hysteresis — deliberately separate from
+        // Dark-sky exposure gate (Milky Way / zodiacal / aurora) — deliberately separate from
         // "Pollution gain"/"Extinction" above so tuning those for star/satellite realism never
-        // forces a Milky Way retune. See mwSuppressEased member comment (SatelliteSim.h).
+        // forces a dark-sky retune. Lo/Hi are the two ends of the sky-brightness ramp and
+        // "City sky mag" is the value it ramps TO; the fade times ease the dome feeding it. See
+        // the mwPollutionThresholdLo/darkSkyCityMag member comments (SatelliteSim.h) and
+        // shaders/include/darksky.glsl.
         {"MW pollut. lo", &mwPollutionThresholdLo, 0.0f, 0.5f, 0.005f, "%.3f", 11},
         {"MW pollut. hi", &mwPollutionThresholdHi, 0.001f, 0.5f, 0.005f, "%.3f", 12},
-        {"MW fade in (s)", &mwFadeInTimeS, 0.0f, 120.0f, 1.0f, "%.1f", 13},
-        {"MW fade out (s)", &mwFadeOutTimeS, 0.0f, 60.0f, 0.5f, "%.1f", 14},
+        // mag/arcsec^2, so LOWER = brighter city sky = harsher suppression. 16 is brighter than
+        // any real site, 22 is pristine (i.e. the gate does nothing at all).
+        {"City sky mag", &darkSkyCityMag, 16.0f, 22.0f, 0.1f, "%.1f", 13},
+        // Twilight half of the same gate. "Twilight end" is the one to reach for first: it is the
+        // solar depression at which the sky is considered fully dark, so it directly sets how long
+        // after sunset dark-sky features come out (18 deg = real astronomical twilight).
+        {"Twilight sky mag", &darkSkyTwilightMag0, 8.0f, 20.0f, 0.25f, "%.1f", 14},
+        {"Twilight end (deg)", &darkSkyTwilightEndDeg, 0.0f, 30.0f, 0.5f, "%.1f", 15},
+        {"Twilight aniso", &darkSkyTwilightAniso, 0.0f, 8.0f, 0.25f, "%.2f", 16},
+        {"MW fade in (s)", &mwFadeInTimeS, 0.0f, 120.0f, 1.0f, "%.1f", 17},
+        {"MW fade out (s)", &mwFadeOutTimeS, 0.0f, 60.0f, 0.5f, "%.1f", 18},
         // Long-exposure trail pipeline — "Long exposure trails" ON/OFF + "Clear Trail" live in the
         // Display tab (near "Render scale"); these two gains are siblings of flareGlowGain/
         // flareStreakGain just above, so they live in this same tab.
-        {"Trail decay (s)", &trailDecaySeconds, 0.2f, 30.0f, 0.2f, "%.1f", 15},
-        {"Trail gain", &trailCompositeGain, 0.0f, 5.0f, 0.05f, "%.2f", 16},
+        {"Trail decay (s)", &trailDecaySeconds, 0.2f, 30.0f, 0.2f, "%.1f", 19},
+        {"Trail gain", &trailCompositeGain, 0.0f, 5.0f, 0.05f, "%.2f", 20},
         // Datacenter flare mitigation tilt — see AttitudeMode::SunTrackingTilted (SatelliteSim.h)
         // and formatSelectedSatInfo's "Power output" readout. 0-45 deg: past ~45 deg the specular
         // lobe is pitched further from nadir than from zenith, so mitigation gains diminish while
         // the cos(tilt) power cost keeps climbing — not a hard physical limit, just past the
         // useful range for a gimbal-limited real panel.
-        {"Flare mitigate tilt (deg)", &flareMitigationTiltDeg, 0.0f, 45.0f, 1.0f, "%.0f", 17},
+        {"Flare mitigate tilt (deg)", &flareMitigationTiltDeg, 0.0f, 45.0f, 1.0f, "%.0f", 21},
     };
     for (auto &pp : photoParams)
     {
@@ -2655,7 +2667,7 @@ void SatelliteSim::buildCloudSliderRows(const UIInput &inp, UIRenderer &ui, Clou
     // silently corrupts a neighboring slider's display text — reported as "Opacity scale has a
     // bugged display, can't see what value is selected." Must stay >= (highest idx in use) + 1,
     // same as hovCloudMinus/hovCloudPlus/draggingCloud above.
-    static char cloudBufs[88][16];
+    static char cloudBufs[91][16];
 
     for (int si = 0; si < count; ++si)
     {
@@ -3162,6 +3174,13 @@ void SatelliteSim::buildSettingsAuroraTab(const UIInput &inp, UIRenderer &ui)
         {"Airglow sodium", &airglowSodiumGain, 0.0f, 3.0f, 0.1f, "%.2f", 15},
         {"Airglow coverage", &airglowCoverageGain, 0.0f, 1.0f, 0.05f, "%.2f", 84},
         {"Airglow polar boost (red)", &airglowPolarGain, 0.0f, 6.0f, 0.1f, "%.2f", 85},
+        {"Zodiacal gain", &zodiacalGain, 0.0f, 0.1f, 0.001f, "%.3f", 88},
+        {"Zodiacal width (deg)", &zodiacalWidthDeg, 5.0f, 60.0f, 1.0f, "%.0f", 89},
+        // Ocean Milky Way reflection (2026-09-08). Appended at the next free index rather than
+        // slotted next to the other sky-feature gains: renumbering this table means renumbering
+        // hovCloudMinus/hovCloudPlus/draggingCloud/cloudBufs in lockstep, and those four have
+        // drifted apart before.
+        {"Ocean MW refl", &oceanMwReflGain, 0.0f, 8.0f, 0.1f, "%.2f", 90},
         {"Storm strength", &stormStrength, 0.0f, 1.0f, 0.05f, "%.2f", 25},
         {"Aurora gain", &auroraGain, 0.0f, 0.1f, 0.001f, "%.3f", 26},
         {"Aurora ground gain", &auroraGroundGain, 0.0f, 0.1f, 0.001f, "%.3f", 27},
@@ -3948,6 +3967,10 @@ void SatelliteSim::loadSettings()
         flareStreakGain = p.value("flare_streak_gain", flareStreakGain);
         mwPollutionThresholdLo = p.value("mw_pollution_threshold_lo", mwPollutionThresholdLo);
         mwPollutionThresholdHi = p.value("mw_pollution_threshold_hi", mwPollutionThresholdHi);
+        darkSkyCityMag = p.value("dark_sky_city_mag", darkSkyCityMag);
+        darkSkyTwilightMag0 = p.value("dark_sky_twilight_mag0", darkSkyTwilightMag0);
+        darkSkyTwilightEndDeg = p.value("dark_sky_twilight_end_deg", darkSkyTwilightEndDeg);
+        darkSkyTwilightAniso = p.value("dark_sky_twilight_aniso", darkSkyTwilightAniso);
         mwFadeInTimeS = p.value("mw_fade_in_time_s", mwFadeInTimeS);
         mwFadeOutTimeS = p.value("mw_fade_out_time_s", mwFadeOutTimeS);
         trailDecaySeconds = p.value("trail_decay_seconds", trailDecaySeconds);
@@ -4138,6 +4161,9 @@ void SatelliteSim::loadSettings()
         airglowSodiumGain = c.value("airglow_sodium_gain", airglowSodiumGain);
         airglowCoverageGain = c.value("airglow_coverage_gain", airglowCoverageGain);
         airglowPolarGain = c.value("airglow_polar_gain", airglowPolarGain);
+        zodiacalGain = c.value("zodiacal_gain", zodiacalGain);
+        oceanMwReflGain = c.value("ocean_mw_refl_gain", oceanMwReflGain);
+        zodiacalWidthDeg = c.value("zodiacal_width_deg", zodiacalWidthDeg);
         cloudShadowMaxDistM = c.value("shadow_max_dist_m", cloudShadowMaxDistM);
         cloudMaxRenderDistM = c.value("max_render_dist_m", cloudMaxRenderDistM);
         viewSamplesMin = c.value("view_samples_min", viewSamplesMin);
@@ -4240,6 +4266,10 @@ void SatelliteSim::saveSettings()
         {"flare_streak_gain", flareStreakGain},
         {"mw_pollution_threshold_lo", mwPollutionThresholdLo},
         {"mw_pollution_threshold_hi", mwPollutionThresholdHi},
+        {"dark_sky_city_mag", darkSkyCityMag},
+        {"dark_sky_twilight_mag0", darkSkyTwilightMag0},
+        {"dark_sky_twilight_end_deg", darkSkyTwilightEndDeg},
+        {"dark_sky_twilight_aniso", darkSkyTwilightAniso},
         {"mw_fade_in_time_s", mwFadeInTimeS},
         {"mw_fade_out_time_s", mwFadeOutTimeS},
         {"trail_decay_seconds", trailDecaySeconds},
@@ -4317,6 +4347,9 @@ void SatelliteSim::saveSettings()
         {"airglow_sodium_gain", airglowSodiumGain},
         {"airglow_coverage_gain", airglowCoverageGain},
         {"airglow_polar_gain", airglowPolarGain},
+        {"zodiacal_gain", zodiacalGain},
+        {"ocean_mw_refl_gain", oceanMwReflGain},
+        {"zodiacal_width_deg", zodiacalWidthDeg},
         {"shadow_max_dist_m", cloudShadowMaxDistM},
         {"max_render_dist_m", cloudMaxRenderDistM},
         {"view_samples_min", viewSamplesMin},
