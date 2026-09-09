@@ -11,30 +11,19 @@ layout(set = 0, binding = 1) readonly buffer SatVisibleBuf {
     SatVisible satellites[];
 };
 
-// ── Push constants (full SatDrawPC, 168 bytes) ────────────────────────────────
-// Declares the full struct through noTwinkle (offset 164) even though most fields in between are
-// unused by this shader — GLSL push_constant blocks must be a contiguous prefix of the pushed
-// bytes, so reaching the last field means declaring everything before it (same pattern sat_sky.frag
-// already uses for its own trailing fields).
+// ── Push constants (prefix of PointDrawPC, 128 bytes — see SatelliteSim.h) ─────────────────────
+// Declares through obsECEFDir, the last field this shader reads. noTwinkle moved up to offset 76
+// (from 164 in the old shared SatDrawPC) and sunDirENU is gone (it was never read here) — the
+// point pipelines carry the smaller PointDrawPC now so their push-constant range fits the 128-byte
+// maxPushConstantsSize floor.
 layout(push_constant) uniform PC {
     mat4  skyView;
     float fovYRad;
     float aspect;
-    float gmst;        // offset 72
-    float waveTime;    // offset 76 — simSecInDay, used for twinkling
-    vec4  sunDirENU;   // offset 80 — unused
-    vec4  moonDirENU;  // offset 96 — xyz=moon dir ENU, w=unused here (illuminated fraction)
-    vec4  obsECEFDir;  // offset 112: xyz=obs ECEF, w=obsHeightOffset (m)
-    uint  debugDisableMask; // offset 128 — unused here
-    float pad0;             // offset 132 — unused here
-    vec2  screenSizePx;     // offset 136 — unused here
-    float skyGlareVisibility; // offset 144 — unused here
-    float beamMaxRangeM;      // offset 148 — unused here
-    float beamSkyGlowGain;    // offset 152 — unused here
-    float beamGlowBleedGain;  // offset 156 — unused here
-    float beamProximityGlow;  // offset 160 — unused here
-    float noTwinkle;          // offset 164 — S3/planets follow-up: 1 = skip scintillation below
-                               // (set only on the planet draw call — see SatDrawPC's own comment)
+    float waveTime;   // offset 72 — simSecInDay, used for twinkling
+    float noTwinkle;  // offset 76 — 1 = skip scintillation (planet draw only)
+    vec4  moonDirENU; // offset 80 — xyz=moon dir ENU, w=illuminated fraction (unused here)
+    vec4  obsECEFDir; // offset 96 — xyz=obs ECEF, w=obsHeightOffset (m)
 } pc;
 
 // Matches kMoonAngR in sat_sky.frag's moon disc (0.004578 * 3.0) — the Moon is a real opaque

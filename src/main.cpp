@@ -1,9 +1,11 @@
 #include "App.h"
 #include "Log.h"
+#include "Paths.h"
 #include "simulations/GameOfLife.h"
 #include "simulations/Particles.h"
 #include "simulations/Scene3DDemo.h"
 #include "simulations/SatelliteSim.h"
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 
@@ -18,6 +20,23 @@ int main()
     // As early as possible — before any Vulkan call — so an instance/device creation
     // failure (missing driver, unsupported GPU) still lands in the log file (NEW-2).
     Log::init();
+
+    // Read-only game data (assets/, shaders/, constellations.json) lives next to the exe.
+    // Most asset loads still use bare relative paths, so anchor the CWD to the exe directory
+    // — otherwise launching from Finder or any other directory (CWD = $HOME) fails to find
+    // assets/. Shader/JSON loads already resolve against Paths::exeDir() explicitly and are
+    // unaffected; userDataDir() also resolves exeDir() explicitly, so writes are unaffected.
+    try
+    {
+        std::error_code ec;
+        std::filesystem::current_path(Paths::exeDir(), ec);
+        if (ec)
+            Log::line("WARN: could not chdir to exe dir: " + ec.message());
+    }
+    catch (const std::exception &e)
+    {
+        Log::line(std::string("WARN: chdir to exe dir failed: ") + e.what());
+    }
 
     try
     {

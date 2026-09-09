@@ -43,33 +43,22 @@ layout(set = 0, binding = 6) uniform sampler2D cloudTargetB; // rgb = A_total (c
 // trail draw (no depth attachment of its own) sets pc.manualTerrainTest and pays for the fetch.
 layout(set = 0, binding = 7) uniform sampler2D sceneDepthTex;
 
-// Declares only the fields this shader reads, at their real SatDrawPC byte offsets — same
-// "prefix of the shared push-constant block" trick sat_point.vert already uses, extended through
-// manualTerrainTest (offset 172) for the long-exposure trail follow-up.
+// Declares a prefix of PointDrawPC (128 bytes — see SatelliteSim.h), through the last field this
+// shader reads. debugDisableMask, screenSizePx and manualTerrainTest were relocated here from the
+// old shared SatDrawPC tail so both point pipeline layouts fit the 128-byte maxPushConstantsSize
+// floor; the sky-only scalars that used to sit between them went to the CloudParams UBO instead.
 layout(push_constant) uniform PC {
-    mat4  skyView;          // offset 0 — unused here, declared for layout consistency
-    float fovYRad;          // offset 64
-    float aspect;           // offset 68
-    float gmst;             // offset 72
-    float waveTime;         // offset 76
-    vec4  sunDirENU;        // offset 80
-    vec4  moonDirENU;       // offset 96
-    vec4  obsECEFDir;       // offset 112
-    uint  debugDisableMask; // offset 128 — unused here
-    float pad0;             // offset 132
-    vec2  screenSizePx;     // offset 136
-    float skyGlareVisibility; // offset 144 — unused here
-    float beamMaxRangeM;      // offset 148 — unused here
-    float beamSkyGlowGain;    // offset 152 — unused here
-    float beamGlowBleedGain;  // offset 156 — unused here
-    float beamProximityGlow;  // offset 160 — unused here
-    float noTwinkle;          // offset 164 — unused here
-    float mwSuppressEased;    // offset 168 — unused here
-    float manualTerrainTest;  // offset 172 — 1 = do the manual sceneDepthTex hit-test below
+    mat4  skyView;            // offset 0   — unused here, declared for layout consistency
+    float fovYRad;            // offset 64  — unused here
+    float aspect;             // offset 68  — unused here
+    float waveTime;           // offset 72  — unused here
+    float noTwinkle;          // offset 76  — unused here (star_point.vert only)
+    vec4  moonDirENU;         // offset 80  — unused here (star_point.vert only)
+    vec4  obsECEFDir;         // offset 96  — unused here (star_point.vert only)
+    vec2  screenSizePx;       // offset 112 — full-res target size for the cloud/depth UVs below
+    uint  debugDisableMask;   // offset 120 — knockout bit 4096 (satellite point cloud occlusion)
+    float manualTerrainTest;  // offset 124 — 1 = do the manual sceneDepthTex hit-test below
 } pc;
-
-const float kNoSurfaceT = 1e30; // mirrors common.glsl's constant — this shader skips the #include
-                                 // machinery for a single value, same idiom flare_source.frag uses
 
 void main() {
     // gl_PointCoord is [0,1] across the point sprite quad; c is centred at (0,0), d is the
@@ -108,18 +97,22 @@ void main() {
         cloudVis = cloudHardOcclude * pow(clamp(cloudBlock, 0.0, 1.0), kSatCloudSuppressPower);
     }
 
-    // ── Terrain occlusion (long-exposure trail follow-up) ──────────────────────
-    // Only the trail draw sets this — the live draw already gets terrain occlusion for free from
-    // the main render pass's hardware depth test (this pipeline is drawn at a fixed depth of 0.5,
-    // which loses against any real terrain hit and wins against pure sky — see SatDrawPC's own
-    // comment). The trail's offscreen render pass has no depth attachment at all, so it needs this
-    // explicit test instead — same technique flare_source.frag already uses for the same reason:
-    // any real terrain/ocean hit along this screen ray occludes a satellite, regardless of how far
-    // away that hit actually is (satellites/stars have no real depth of their own to compare against).
+    // ── Terrain occlusion ─────────────────────────────────────────────────────
+    // Set by (a) the long-exposure trail draw, whose offscreen render pass has no depth attachment,
+    // and (b) the live draw at renderScale < 1.0, where the sky pass is a low-res prepass that never
+    // writes the frame's depth buffer (see buildPointDrawPC). At renderScale 1.0 the live draw
+    // instead gets this for free from the hardware depth test against sat_sky.frag's gl_FragDepth.
+    //
+    // kOcclusionCap MUST match sat_sky.frag's constant of the same name: that shader only writes a
+    // depth < 1.0 (i.e. only occludes points) for terrain/ocean closer than this along the view
+    // ray, so from orbit — where the Earth's surface is hundreds of km away — satellites between the
+    // camera and the planet still render in front of it. Reproducing the hard "any hit occludes"
+    // test here instead made the Earth's disc swallow every satellite in orbital views.
     float terrainVis = 1.0;
     if (pc.manualTerrainTest >= 0.5) {
         vec2 depthUV = gl_FragCoord.xy / pc.screenSizePx;
-        terrainVis = (texture(sceneDepthTex, depthUV).r >= kNoSurfaceT * 0.5) ? 1.0 : 0.0;
+        const float kOcclusionCap = 150000.0;
+        terrainVis = (texture(sceneDepthTex, depthUV).r < kOcclusionCap) ? 0.0 : 1.0;
     }
 
     // ── Inner core: tight pinpoint, log-compressed brightness ─────────────────

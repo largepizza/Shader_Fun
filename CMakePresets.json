@@ -1,0 +1,80 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+
+        {
+            "name": "windows",
+            "displayName": "Windows (Visual Studio 2022)",
+            "inherits": "base",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+        },
+        {
+            "name": "windows-release",
+            "displayName": "Windows release (dist/)",
+            "inherits": "windows",
+            "binaryDir": "${sourceDir}/build-win-release"
+        },
+
+        {
+            "name": "linux",
+            "displayName": "Linux (Ninja)",
+            "inherits": "base",
+            "generator": "Ninja",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+        },
+        {
+            "name": "linux-release",
+            "displayName": "Linux release (dist/)",
+            "inherits": "linux",
+            "binaryDir": "${sourceDir}/build-linux-release",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+        },
+
+        {
+            "name": "macos",
+            "displayName": "macOS (native arch, Ninja)",
+            "inherits": "base",
+            "generator": "Ninja",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
+        },
+        {
+            "name": "macos-universal-release",
+            "displayName": "macOS release, universal (arm64 + x86_64)",
+            "inherits": "macos",
+            "binaryDir": "${sourceDir}/build-macos-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0"
+            }
+        }
+    ],
+
+    "buildPresets": [
+        { "name": "windows",       "configurePreset": "windows",       "configuration": "Debug" },
+        { "name": "windows-release","configurePreset": "windows-release","configuration": "Release" },
+        { "name": "windows-package","configurePreset": "windows-release","configuration": "Release", "targets": ["package-release"] },
+
+        { "name": "linux",          "configurePreset": "linux" },
+        { "name": "linux-release",  "configurePreset": "linux-release" },
+        { "name": "linux-package",  "configurePreset": "linux-release",  "targets": ["package-release"] },
+
+        { "name": "macos",          "configurePreset": "macos" },
+        { "name": "macos-release",  "configurePreset": "macos-universal-release" },
+        { "name": "macos-package",  "configurePreset": "macos-universal-release", "targets": ["package-release"] }
+    ]
+}

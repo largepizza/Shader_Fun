@@ -1,0 +1,448 @@
+{
+    "$schema": "./constellations.schema.json",
+    "version": 1,
+    "satellite_types": [
+        {
+            "name": "Starlink",
+            "base_color": [0.80, 0.87, 1.00],
+            "cross_section_m2": 10.0,
+            "primary": { "attitude": "NadirPointing", "spec_exp": 18.0, "weight": 1.0 },
+            "secondary": { "attitude": "Perpendicular", "spec_exp": 0.0, "weight": 0.0 },
+            "diffuse": 0.02,
+            "mirror_frac": 0.05
+        },
+        {
+            "name": "LEO Broadband",
+            "base_color": [1.00, 0.92, 0.75],
+            "cross_section_m2": 5.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 18.0, "weight": 1.0 },
+            "secondary": { "attitude": "Perpendicular", "spec_exp": 0.0, "weight": 0.0 },
+            "diffuse": 0.02,
+            "mirror_frac": 0.02
+        },
+        {
+            "name": "GEO Comsat",
+            "base_color": [0.95, 0.95, 1.00],
+            "cross_section_m2": 50.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 3.0, "weight": 1.00 },
+            "secondary": { "attitude": "AntiNadir", "spec_exp": 2.0, "weight": 0.10 },
+            "diffuse": 0.05,
+            "mirror_frac": 0.10
+        },
+        {
+            "name": "ISS",
+            "base_color": [1.00, 0.85, 0.70],
+            "cross_section_m2": 3244.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 12.0, "weight": 1.00 },
+            "secondary": { "attitude": "AntiNadir", "spec_exp": 4.0, "weight": 0.35 },
+            "diffuse": 0.04,
+            "mirror_frac": 0.05
+        },
+        {
+            "name": "SpaceX AI Satellites",
+            "base_color": [1.00, 1.00, 0.92],
+            "cross_section_m2": 600.0,
+            "primary": { "attitude": "SunTrackingTilted", "spec_exp": 25.0, "weight": 1.0 },
+            "secondary": { "attitude": "SunPerp", "spec_exp": 3.0, "weight": 0.18 },
+            "diffuse": 0.005,
+            "mirror_frac": 0.5
+        },
+        {
+            "name": "Reflect Mirror",
+            "base_color": [1.00, 0.97, 0.94],
+            "cross_section_m2": 2376.0,
+            "primary": { "attitude": "TargetedReflector", "spec_exp": 200.0, "weight": 1.0 },
+            "secondary": { "attitude": "Perpendicular", "spec_exp": 0.0, "weight": 0.0 },
+            "diffuse": 0.001,
+            "mirror_frac": 0.97
+        },
+        {
+            "name": "Debris",
+            "base_color": [0.78, 0.74, 0.68],
+            "cross_section_m2": 0.05,
+            "primary": { "attitude": "Tumbling", "spec_exp": 10.0, "weight": 1.0 },
+            "secondary": { "attitude": "Perpendicular", "spec_exp": 6.0, "weight": 0.0 },
+            "diffuse": 0.0,
+            "mirror_frac": 0.03
+        },
+        {
+            "name": "Ring Debris",
+            "base_color": [0.93, 0.91, 0.87],
+            "cross_section_m2": 13000.0,
+            "primary": { "attitude": "Tumbling", "spec_exp": 10.0, "weight": 1.0 },
+            "secondary": { "attitude": "Perpendicular", "spec_exp": 0.0, "weight": 0.0 },
+            "diffuse": 0.80,
+            "mirror_frac": 0.06
+        },
+        {
+            "name": "Starlink Gen2",
+            "base_color": [0.80, 0.87, 1.00],
+            "cross_section_m2": 10.0,
+            "primary": { "attitude": "KnifeEdge", "spec_exp": 18.0, "weight": 1.0 },
+            "secondary": { "attitude": "NadirPointing", "spec_exp": 5.0, "weight": 0.2 },
+            "diffuse": 0.0,
+            "mirror_frac": 0.05
+        },
+        {
+            "name": "Starlink Gen3",
+            "base_color": [0.80, 0.87, 1.00],
+            "cross_section_m2": 50.0,
+            "primary": { "attitude": "KnifeEdge", "spec_exp": 18.0, "weight": 1.0 },
+            "secondary": { "attitude": "NadirPointing", "spec_exp": 6.0, "weight": 0.20 },
+            "diffuse": 0.01,
+            "mirror_frac": 0.04
+        },
+        {
+            "name": "Amazon Leo",
+            "base_color": [0.92, 0.92, 0.96],
+            "cross_section_m2": 15.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 20.0, "weight": 1.0 },
+            "secondary": { "attitude": "NadirPointing", "spec_exp": 5.0, "weight": 0.25 },
+            "diffuse": 0.03,
+            "mirror_frac": 0.03
+        },
+        {
+            "name": "Guowang Sat",
+            "base_color": [0.88, 0.90, 0.85],
+            "cross_section_m2": 14.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 18.0, "weight": 1.0 },
+            "secondary": { "attitude": "NadirPointing", "spec_exp": 4.0, "weight": 0.25 },
+            "diffuse": 0.03,
+            "mirror_frac": 0.03
+        },
+        {
+            "name": "Tiangong",
+            "base_color": [1.00, 0.88, 0.72],
+            "cross_section_m2": 400.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 14.0, "weight": 1.0 },
+            "secondary": { "attitude": "AntiNadir", "spec_exp": 3.0, "weight": 0.20 },
+            "diffuse": 0.04,
+            "mirror_frac": 0.04
+        },
+        {
+            "name": "Haven-1",
+            "base_color": [0.95, 0.95, 1.00],
+            "cross_section_m2": 41.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 15.0, "weight": 1.0 },
+            "secondary": { "attitude": "NadirPointing", "spec_exp": 3.0, "weight": 0.35 },
+            "diffuse": 0.05,
+            "mirror_frac": 0.04
+        },
+        {
+            "name": "Haven-2",
+            "base_color": [0.95, 0.95, 1.00],
+            "cross_section_m2": 155.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 14.0, "weight": 1.0 },
+            "secondary": { "attitude": "AntiNadir", "spec_exp": 3.0, "weight": 0.25 },
+            "diffuse": 0.04,
+            "mirror_frac": 0.04
+        },
+        {
+            "name": "Axiom Station",
+            "base_color": [0.90, 0.93, 1.00],
+            "cross_section_m2": 370.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 12.0, "weight": 1.0 },
+            "secondary": { "attitude": "AntiNadir", "spec_exp": 4.0, "weight": 0.30 },
+            "diffuse": 0.04,
+            "mirror_frac": 0.05
+        },
+        {
+            "name": "Orbital Reef",
+            "base_color": [0.88, 0.95, 1.00],
+            "cross_section_m2": 309.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 12.0, "weight": 1.0 },
+            "secondary": { "attitude": "AntiNadir", "spec_exp": 3.0, "weight": 0.25 },
+            "diffuse": 0.05,
+            "mirror_frac": 0.04
+        },
+        {
+            "name": "Russian Orbital Service Station",
+            "base_color": [0.97, 0.93, 0.85],
+            "cross_section_m2": 167.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 12.0, "weight": 1.0 },
+            "secondary": { "attitude": "AntiNadir", "spec_exp": 3.0, "weight": 0.25 },
+            "diffuse": 0.04,
+            "mirror_frac": 0.05
+        },
+        {
+            "name": "Bharatiya Antariksha Station",
+            "base_color": [1.00, 0.90, 0.75],
+            "cross_section_m2": 170.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 13.0, "weight": 1.0 },
+            "secondary": { "attitude": "AntiNadir", "spec_exp": 3.0, "weight": 0.20 },
+            "diffuse": 0.05,
+            "mirror_frac": 0.04
+        },
+        {
+            "name": "Starlab",
+            "base_color": [0.96, 0.96, 0.92],
+            "cross_section_m2": 185.0,
+            "primary": { "attitude": "SunTracking", "spec_exp": 10.0, "weight": 1.0 },
+            "secondary": { "attitude": "AntiNadir", "spec_exp": 2.0, "weight": 0.30 },
+            "diffuse": 0.08,
+            "mirror_frac": 0.03
+        },
+        {
+            "name": "Starship HLS Depot",
+            "base_color": [0.90, 0.90, 0.88],
+            "cross_section_m2": 450.0,
+            "primary": { "attitude": "NadirPointing", "spec_exp": 3.0, "weight": 1.0 },
+            "secondary": { "attitude": "SunTracking", "spec_exp": 8.0, "weight": 0.08 },
+            "diffuse": 0.10,
+            "mirror_frac": 0.25
+        }
+    ],
+    "constellations": [
+        {
+            "name": "Starlink Gen1",
+            "type": "Starlink",
+            "alt_km": 550.0,
+            "incl_deg": 53.0,
+            "num_planes": 72,
+            "per_plane": 61,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Starlink Gen2",
+            "type": "Starlink Gen2",
+            "alt_km": 525.0,
+            "incl_deg": 53.2,
+            "num_planes": 120,
+            "per_plane": 254,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Starlink Gen3 Broadband",
+            "type": "Starlink Gen3",
+            "alt_km": 525.0,
+            "incl_deg": 53.0,
+            "num_planes": 100,
+            "per_plane": 50,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Starlink Gen3 Direct-to-Cell",
+            "type": "Starlink Gen3",
+            "alt_km": 326.0,
+            "incl_deg": 53.0,
+            "num_planes": 100,
+            "per_plane": 150,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "OneWeb",
+            "type": "LEO Broadband",
+            "alt_km": 1200.0,
+            "incl_deg": 87.9,
+            "num_planes": 18,
+            "per_plane": 36,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Amazon Leo Shell 1",
+            "type": "Amazon Leo",
+            "alt_km": 590.0,
+            "incl_deg": 51.9,
+            "num_planes": 21,
+            "per_plane": 30,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Amazon Leo Shell 2",
+            "type": "Amazon Leo",
+            "alt_km": 610.0,
+            "incl_deg": 33.0,
+            "num_planes": 36,
+            "per_plane": 36,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Amazon Leo Shell 3",
+            "type": "Amazon Leo",
+            "alt_km": 630.0,
+            "incl_deg": 26.0,
+            "num_planes": 34,
+            "per_plane": 34,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Guowang-2 Polar",
+            "type": "Guowang Sat",
+            "alt_km": 1145.0,
+            "incl_deg": 86.5,
+            "num_planes": 48,
+            "per_plane": 72,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Guowang-2 Mid-Inclination",
+            "type": "Guowang Sat",
+            "alt_km": 1145.0,
+            "incl_deg": 50.0,
+            "num_planes": 48,
+            "per_plane": 72,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Guowang GW-A59",
+            "type": "Guowang Sat",
+            "alt_km": 572.0,
+            "incl_deg": 55.0,
+            "num_planes": 80,
+            "per_plane": 76,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "International Space Station",
+            "type": "ISS",
+            "alt_km": 408.0,
+            "incl_deg": 51.6,
+            "num_planes": 1,
+            "per_plane": 1,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Tiangong",
+            "type": "Tiangong",
+            "alt_km": 390.0,
+            "incl_deg": 41.5,
+            "num_planes": 1,
+            "per_plane": 1,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Haven-1",
+            "type": "Haven-1",
+            "alt_km": 425.0,
+            "incl_deg": 51.6,
+            "num_planes": 1,
+            "per_plane": 1,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Haven-2",
+            "type": "Haven-2",
+            "alt_km": 420.0,
+            "incl_deg": 51.6,
+            "num_planes": 1,
+            "per_plane": 1,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Axiom Station",
+            "type": "Axiom Station",
+            "alt_km": 408.0,
+            "incl_deg": 51.6,
+            "num_planes": 1,
+            "per_plane": 1,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Orbital Reef",
+            "type": "Orbital Reef",
+            "alt_km": 500.0,
+            "incl_deg": 51.6,
+            "num_planes": 1,
+            "per_plane": 1,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Russian Orbital Service Station",
+            "type": "Russian Orbital Service Station",
+            "alt_km": 400.0,
+            "incl_deg": 51.6,
+            "num_planes": 1,
+            "per_plane": 1,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Bharatiya Antariksha Station",
+            "type": "Bharatiya Antariksha Station",
+            "alt_km": 420.0,
+            "incl_deg": 51.6,
+            "num_planes": 1,
+            "per_plane": 1,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Starlab",
+            "type": "Starlab",
+            "alt_km": 400.0,
+            "incl_deg": 51.6,
+            "num_planes": 1,
+            "per_plane": 1,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "Starship HLS Fuel Depots",
+            "type": "Starship HLS Depot",
+            "alt_km": 281.0,
+            "incl_deg": 31.0,
+            "num_planes": 1,
+            "per_plane": 3,
+            "enabled": true,
+            "distribution": "Walker"
+        },
+        {
+            "name": "SpaceX AI Satellites",
+            "type": "SpaceX AI Satellites",
+            "alt_km": 1250.0,
+            "incl_deg": 0.0,
+            "num_planes": 1000,
+            "per_plane": 1000,
+            "enabled": true,
+            "distribution": "Disk",
+            "alt_jitter_km": 0.05,
+            "raan_deg": 0.0,
+            "align_terminator": true,
+            "num_rings": 2000,
+            "ring_spacing_km": 0.70
+        },
+        {
+            "name": "Reflect Orbital",
+            "type": "Reflect Mirror",
+            "alt_km": 500.0,
+            "incl_deg": 0.0,
+            "num_planes": 10,
+            "per_plane": 500,
+            "enabled": true,
+            "distribution": "Disk",
+            "alt_jitter_km": 0.05,
+            "raan_deg": 0.0,
+            "align_terminator": true,
+            "num_rings": 3,
+            "ring_spacing_km": 10.0
+        },
+        {
+            "name": "Space Junk",
+            "type": "Debris",
+            "alt_km": 1000.0,
+            "incl_deg": 180.0,
+            "num_planes": 1000,
+            "per_plane": 300,
+            "enabled": true,
+            "distribution": "RandomShell",
+            "alt_jitter_km": 500.0
+        }
+    ]
+}

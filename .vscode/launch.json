@@ -3,17 +3,33 @@
     "configurations": [
         {
             // Press F5 to build (if needed) and launch with the debugger attached.
-            // CMake Tools handles resolving the exe path and working directory.
-            "name": "Debug SAT LIGHT SIM",
-            "type": "cppvsdbg",          // Use cppdbg on Linux/macOS
+            // CMake Tools resolves the exe path and working directory.
+            "name": "Debug SAT LIGHT SIM (macOS/Linux)",
+            "type": "cppdbg",
             "request": "launch",
             "program": "${command:cmake.launchTargetPath}",
             "args": [],
             "stopAtEntry": false,
-            // Working directory = folder containing the exe (where shaders/ lives)
+            "cwd": "${command:cmake.launchTargetDirectory}",
+            "MIMode": "lldb",
+            // Inherited from the environment, never hardcoded here (this file is committed).
+            // Run `source ~/VulkanSDK/<version>/setup-env.sh` before launching VS Code — it
+            // sets VULKAN_SDK, VK_ICD_FILENAMES (MoltenVK), VK_LAYER_PATH and DYLD_LIBRARY_PATH.
+            // Launching VS Code from Finder does NOT inherit a shell profile; start it with
+            // `code .` from a configured terminal, or add the vars to VS Code user settings.
+            "environment": [],
+            "preLaunchTask": "CMake: build"
+        },
+        {
+            // Original Windows configuration (uses the MSVC debugger).
+            "name": "Debug SAT LIGHT SIM (Windows)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${command:cmake.launchTargetPath}",
+            "args": [],
+            "stopAtEntry": false,
             "cwd": "${command:cmake.launchTargetDirectory}",
             "environment": [],
-            "console": "integratedTerminal",
             "preLaunchTask": "CMake: build"
         }
     ]

@@ -405,6 +405,14 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
     // can safely run alongside the (by then static) cinematic hold.
     if (win && (!showIntro || introCaptionIndex >= kIntroControlsIndex))
     {
+        // Optional per-axis look inversion (Settings > Controls). Mutate the frame's accumulated
+        // deltas once, up front, so every consumer below (cinematic drift + direct control) sees
+        // the inverted value; dmx/dmy are zeroed at the end of this block regardless.
+        if (invertMouseX)
+            dmx = -dmx;
+        if (invertMouseY)
+            dmy = -dmy;
+
         // Clear cinematic mode as soon as RMB is released — the toggle only lives
         // while a pan is active, so it resets automatically for the next drag.
         if (!camera.captured && cinematicMode)
@@ -855,7 +863,11 @@ void SatelliteSim::buildRightHudPanel(const UIInput &inp, UIRenderer &ui)
         snprintf(lonBuf, sizeof(lonBuf), "%.1f\xc2\xb0 %c", absLon, obsLonDeg >= 0.0f ? 'E' : 'W');
         float altMeters = altModeSeaLevel ? (obsTerrainH + obsHeightOffset) : obsHeightOffset;
         formatAltitude(altBuf, sizeof(altBuf), altMeters, unitSystem);
-        snprintf(fpsBuf, sizeof(fpsBuf), "%.0f fps", inp.dt > 0.0f ? 1.0f / inp.dt : 0.0f);
+        // inp.dt is the real frame delta (App clamps it only against multi-second hitches), so
+        // 1/dt is the true frame rate. EMA-smooth it so a genuinely low rate shows a steady number.
+        float instFps = inp.dt > 0.0f ? 1.0f / inp.dt : 0.0f;
+        fpsBadgeEma = fpsBadgeEma > 0.0f ? fpsBadgeEma + 0.1f * (instFps - fpsBadgeEma) : instFps;
+        snprintf(fpsBuf, sizeof(fpsBuf), "%.0f fps", fpsBadgeEma);
     }
     Clay_String latStr{false, (int32_t)strlen(latBuf), latBuf};
     Clay_String lonStr{false, (int32_t)strlen(lonBuf), lonBuf};
@@ -966,9 +978,14 @@ void SatelliteSim::buildRightHudPanel(const UIInput &inp, UIRenderer &ui)
                                        .backgroundColor = Pal::divider}) {}
 
         // ── Version ───────────────────────────────────────────────────────
+        // Built from APP_VERSION (CMake → version.h) so it can't drift from the VERSION file.
+        static char versionBuf[48] = {};
+        if (!versionBuf[0])
+            snprintf(versionBuf, sizeof(versionBuf), "SAT LIGHT SIM v%s", APP_VERSION);
+        Clay_String versionStr{false, (int32_t)strlen(versionBuf), versionBuf};
         CLAY(CLAY_ID("SBVersion"), {.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)}}})
         {
-            CLAY_TEXT(CLAY_STRING("SAT LIGHT SIM v1.1.0"),
+            CLAY_TEXT(versionStr,
                       CLAY_TEXT_CONFIG({.textColor = Pal::textHint, .fontSize = fs(11)}));
         }
 
@@ -1564,6 +1581,43 @@ void SatelliteSim::buildSettingsSoundTab(const UIInput &inp, UIRenderer &ui)
 // ─── buildSettingsControlsTab ───────────────────────────────────────────────
 void SatelliteSim::buildSettingsControlsTab(const UIInput &inp, UIRenderer &ui)
 {
+    // The floating quick-reference window (buildViewControlsWindow) used to auto-open on
+    // startup; user testing found almost nobody closed it, so demo footage was consistently
+    // full of it sitting in the top-left. It no longer opens itself — this button is the only
+    // way to bring it up now, and it lives here rather than on the HUD since a player reaching
+    // for a control reminder is already in Settings looking at the live rebind list below.
+    CLAY(CLAY_ID("OpenControlsWindowRow"), {.layout = {
+                                                .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(32)},
+                                                .padding = {4, 4, 4, 4},
+                                                .childGap = 8,
+                                                .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                                .layoutDirection = CLAY_LEFT_TO_RIGHT}})
+    {
+        CLAY_TEXT(CLAY_STRING("Quick-reference overlay"),
+                  CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(13)}));
+        CLAY(CLAY_ID("OpenControlsWindowSpacer"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
+
+        Clay_Color btnBg = viewControlsChrome.open ? Pal::btnAccent : (hovOpenControlsWindow ? Pal::btnHover : Pal::btnIdle);
+        CLAY(CLAY_ID("OpenControlsWindowBtn"), {.layout = {
+                                                    .sizing = {CLAY_SIZING_FIXED(140), CLAY_SIZING_FIXED(24)},
+                                                    .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                .backgroundColor = btnBg,
+                                                .cornerRadius = CLAY_CORNER_RADIUS(3)})
+        {
+            bool n = Clay_Hovered();
+            sndRollover(n, hovOpenControlsWindow);
+            sndClick(n, inp.lmbPressed);
+            hovOpenControlsWindow = n;
+            if (n && inp.lmbPressed)
+                viewControlsChrome.open = !viewControlsChrome.open;
+            CLAY_TEXT(viewControlsChrome.open ? CLAY_STRING("Showing") : CLAY_STRING("Show window"),
+                      CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(11)}));
+        }
+    }
+    CLAY(CLAY_ID("ControlsTabDiv"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                                .padding = {0, 0, 4, 8}},
+                                     .backgroundColor = {40, 40, 44, 255}}) {}
+
     static char kbKeyBuf[KB_COUNT][16];
     static char kbPadBuf[KB_COUNT][16];
     for (int ki = 0; ki < (int)keybindings.size() && ki < KB_COUNT; ++ki)
@@ -1667,6 +1721,60 @@ void SatelliteSim::buildSettingsControlsTab(const UIInput &inp, UIRenderer &ui)
             }
         }
     }
+
+    // ── Look-axis inversion ───────────────────────────────────────────────────
+    // Applied where the mouse dmx/dmy and gamepad right-stick look deltas are consumed
+    // (SatelliteSim.cpp / SatelliteSimUI.cpp look block). Persisted in settings.json's "controls".
+    CLAY(CLAY_ID("InvertDiv"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                           .padding = {0, 0, 8, 6}},
+                                .backgroundColor = {40, 40, 44, 255}}) {}
+    CLAY_TEXT(CLAY_STRING("INVERT LOOK AXES"),
+              CLAY_TEXT_CONFIG({.textColor = Pal::textHint, .fontSize = fs(10)}));
+
+    struct InvertRow
+    {
+        const char *label;
+        bool *value;
+        bool *hov;
+    };
+    InvertRow invertRows[] = {
+        {"Mouse X (horizontal)", &invertMouseX, &hovInvertMouseX},
+        {"Mouse Y (vertical)", &invertMouseY, &hovInvertMouseY},
+        {"Controller X (horizontal)", &invertPadX, &hovInvertPadX},
+        {"Controller Y (vertical)", &invertPadY, &hovInvertPadY},
+    };
+    int invIdx = 0;
+    for (auto &row : invertRows)
+    {
+        CLAY(CLAY_IDI("InvertRow", invIdx), {.layout = {
+                                                 .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(24)},
+                                                 .padding = {4, 4, 2, 2},
+                                                 .childGap = 8,
+                                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                                 .layoutDirection = CLAY_LEFT_TO_RIGHT}})
+        {
+            Clay_String lbl{false, (int32_t)strlen(row.label), row.label};
+            CLAY_TEXT(lbl, CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(12)}));
+            CLAY(CLAY_IDI("InvertSpacer", invIdx), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
+            Clay_Color chkBg = *row.value ? Pal::btnAccent : (*row.hov ? Pal::btnHover : Pal::btnIdle);
+            CLAY(CLAY_IDI("InvertChk", invIdx), {.layout = {
+                                                     .sizing = {CLAY_SIZING_FIXED(50), CLAY_SIZING_FIXED(22)},
+                                                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                 .backgroundColor = chkBg,
+                                                 .cornerRadius = CLAY_CORNER_RADIUS(3)})
+            {
+                bool n = Clay_Hovered();
+                sndRollover(n, *row.hov);
+                sndClick(n, inp.lmbPressed);
+                if (n && inp.lmbPressed)
+                    *row.value = !*row.value;
+                *row.hov = n;
+                CLAY_TEXT(*row.value ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
+                          CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(11)}));
+            }
+        }
+        ++invIdx;
+    }
 }
 
 // ─── buildSettingsCameraTab ─────────────────────────────────────────────────
@@ -1709,11 +1817,13 @@ void SatelliteSim::buildSettingsDisplayTab(const UIInput &inp, UIRenderer &ui)
                                               .childGap = 6,
                                               .layoutDirection = CLAY_LEFT_TO_RIGHT}})
         {
-            static const char *kPresetLabels[5] = {"Planetarium", "Low", "Medium", "High", "Ultra"};
-            static const GraphicsPreset kPresetValues[5] = {
-                GraphicsPreset::Planetarium, GraphicsPreset::Low, GraphicsPreset::Medium,
-                GraphicsPreset::High, GraphicsPreset::Ultra};
-            for (int i = 0; i < 5; ++i)
+            // Display order is cheapest → most expensive; it is independent of the enum's
+            // numeric order (Potato is enum value 6, appended after Custom, but shown first).
+            static const char *kPresetLabels[6] = {"Potato", "Planetarium", "Low", "Medium", "High", "Ultra"};
+            static const GraphicsPreset kPresetValues[6] = {
+                GraphicsPreset::Potato, GraphicsPreset::Planetarium, GraphicsPreset::Low,
+                GraphicsPreset::Medium, GraphicsPreset::High, GraphicsPreset::Ultra};
+            for (int i = 0; i < 6; ++i)
             {
                 bool isActive = graphicsPreset == kPresetValues[i];
                 Clay_Color btnBg = isActive ? Pal::btnAccent : (hovPreset[i] ? Pal::btnHover : Pal::btnIdle);
@@ -2151,36 +2261,6 @@ void SatelliteSim::buildSettingsDisplayTab(const UIInput &inp, UIRenderer &ui)
         }
     }
 
-    // ── Show controls window on startup ────────────────────────────
-    CLAY(CLAY_ID("ShowControlsRow"), {.layout = {
-                                          .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(28)},
-                                          .padding = {4, 4, 4, 4},
-                                          .childGap = 8,
-                                          .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                                          .layoutDirection = CLAY_LEFT_TO_RIGHT}})
-    {
-        CLAY_TEXT(CLAY_STRING("Show controls window on startup"),
-                  CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(13)}));
-        CLAY(CLAY_ID("ShowControlsSpacer"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
-
-        Clay_Color chkBg = showControlsOnStartup ? Pal::btnAccent : (hovShowControlsStartup ? Pal::btnHover : Pal::btnIdle);
-        CLAY(CLAY_ID("ShowControlsChk"), {.layout = {
-                                              .sizing = {CLAY_SIZING_FIXED(50), CLAY_SIZING_FIXED(22)},
-                                              .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
-                                          .backgroundColor = chkBg,
-                                          .cornerRadius = CLAY_CORNER_RADIUS(3)})
-        {
-            bool n = Clay_Hovered();
-            sndRollover(n, hovShowControlsStartup);
-            sndClick(n, inp.lmbPressed);
-            hovShowControlsStartup = n;
-            if (n && inp.lmbPressed)
-                showControlsOnStartup = !showControlsOnStartup;
-            CLAY_TEXT(showControlsOnStartup ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
-                      CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(11)}));
-        }
-    }
-
     // ── GPU frame breakdown (read-only) ────────────────────────────
     // gpuMsSmoothed[]/gpuMsTotalSmoothed are EMA-smoothed GPU timestamp-query
     // results, one frame stale (see the member comments in SatelliteSim.h).
@@ -2504,7 +2584,7 @@ void SatelliteSim::buildSettingsPhotometryTab(const UIInput &inp, UIRenderer &ui
         const char *fmt;
         int idx;
     };
-    static char photoBufs[18][12];
+    static char photoBufs[22][12];
     PhotoParam photoParams[] = {
         {"Brightness", &brightnessScale, 0.05f, 20.0f, 0.25f, "%.2f", 0},
         {"Day suppress", &daySuppression, 5.0f, 5000.0f, 5.0f, "%.0f", 1},
@@ -2519,24 +2599,36 @@ void SatelliteSim::buildSettingsPhotometryTab(const UIInput &inp, UIRenderer &ui
         // render-to-texture + blur/streak pipeline (see FlareSourcePC's comment in SatelliteSim.h).
         {"Flare glow gain", &flareGlowGain, 0.0f, 0.01f, 0.0005f, "%.2f", 9},
         {"Flare streak", &flareStreakGain, 0.0f, 1.0f, 0.02f, "%.2f", 10},
-        // Milky Way's own light-pollution threshold + fade hysteresis — deliberately separate from
+        // Dark-sky exposure gate (Milky Way / zodiacal / aurora) — deliberately separate from
         // "Pollution gain"/"Extinction" above so tuning those for star/satellite realism never
-        // forces a Milky Way retune. See mwSuppressEased member comment (SatelliteSim.h).
+        // forces a dark-sky retune. Lo/Hi are the two ends of the sky-brightness ramp and
+        // "City sky mag" is the value it ramps TO; the fade times ease the dome feeding it. See
+        // the mwPollutionThresholdLo/darkSkyCityMag member comments (SatelliteSim.h) and
+        // shaders/include/darksky.glsl.
         {"MW pollut. lo", &mwPollutionThresholdLo, 0.0f, 0.5f, 0.005f, "%.3f", 11},
         {"MW pollut. hi", &mwPollutionThresholdHi, 0.001f, 0.5f, 0.005f, "%.3f", 12},
-        {"MW fade in (s)", &mwFadeInTimeS, 0.0f, 120.0f, 1.0f, "%.1f", 13},
-        {"MW fade out (s)", &mwFadeOutTimeS, 0.0f, 60.0f, 0.5f, "%.1f", 14},
+        // mag/arcsec^2, so LOWER = brighter city sky = harsher suppression. 16 is brighter than
+        // any real site, 22 is pristine (i.e. the gate does nothing at all).
+        {"City sky mag", &darkSkyCityMag, 16.0f, 22.0f, 0.1f, "%.1f", 13},
+        // Twilight half of the same gate. "Twilight end" is the one to reach for first: it is the
+        // solar depression at which the sky is considered fully dark, so it directly sets how long
+        // after sunset dark-sky features come out (18 deg = real astronomical twilight).
+        {"Twilight sky mag", &darkSkyTwilightMag0, 8.0f, 20.0f, 0.25f, "%.1f", 14},
+        {"Twilight end (deg)", &darkSkyTwilightEndDeg, 0.0f, 30.0f, 0.5f, "%.1f", 15},
+        {"Twilight aniso", &darkSkyTwilightAniso, 0.0f, 8.0f, 0.25f, "%.2f", 16},
+        {"MW fade in (s)", &mwFadeInTimeS, 0.0f, 120.0f, 1.0f, "%.1f", 17},
+        {"MW fade out (s)", &mwFadeOutTimeS, 0.0f, 60.0f, 0.5f, "%.1f", 18},
         // Long-exposure trail pipeline — "Long exposure trails" ON/OFF + "Clear Trail" live in the
         // Display tab (near "Render scale"); these two gains are siblings of flareGlowGain/
         // flareStreakGain just above, so they live in this same tab.
-        {"Trail decay (s)", &trailDecaySeconds, 0.2f, 30.0f, 0.2f, "%.1f", 15},
-        {"Trail gain", &trailCompositeGain, 0.0f, 5.0f, 0.05f, "%.2f", 16},
+        {"Trail decay (s)", &trailDecaySeconds, 0.2f, 30.0f, 0.2f, "%.1f", 19},
+        {"Trail gain", &trailCompositeGain, 0.0f, 5.0f, 0.05f, "%.2f", 20},
         // Datacenter flare mitigation tilt — see AttitudeMode::SunTrackingTilted (SatelliteSim.h)
         // and formatSelectedSatInfo's "Power output" readout. 0-45 deg: past ~45 deg the specular
         // lobe is pitched further from nadir than from zenith, so mitigation gains diminish while
         // the cos(tilt) power cost keeps climbing — not a hard physical limit, just past the
         // useful range for a gimbal-limited real panel.
-        {"Flare mitigate tilt (deg)", &flareMitigationTiltDeg, 0.0f, 45.0f, 1.0f, "%.0f", 17},
+        {"Flare mitigate tilt (deg)", &flareMitigationTiltDeg, 0.0f, 45.0f, 1.0f, "%.0f", 21},
     };
     for (auto &pp : photoParams)
     {
@@ -2642,7 +2734,7 @@ void SatelliteSim::buildCloudSliderRows(const UIInput &inp, UIRenderer &ui, Clou
     // silently corrupts a neighboring slider's display text — reported as "Opacity scale has a
     // bugged display, can't see what value is selected." Must stay >= (highest idx in use) + 1,
     // same as hovCloudMinus/hovCloudPlus/draggingCloud above.
-    static char cloudBufs[88][16];
+    static char cloudBufs[91][16];
 
     for (int si = 0; si < count; ++si)
     {
@@ -3149,6 +3241,13 @@ void SatelliteSim::buildSettingsAuroraTab(const UIInput &inp, UIRenderer &ui)
         {"Airglow sodium", &airglowSodiumGain, 0.0f, 3.0f, 0.1f, "%.2f", 15},
         {"Airglow coverage", &airglowCoverageGain, 0.0f, 1.0f, 0.05f, "%.2f", 84},
         {"Airglow polar boost (red)", &airglowPolarGain, 0.0f, 6.0f, 0.1f, "%.2f", 85},
+        {"Zodiacal gain", &zodiacalGain, 0.0f, 0.1f, 0.001f, "%.3f", 88},
+        {"Zodiacal width (deg)", &zodiacalWidthDeg, 5.0f, 60.0f, 1.0f, "%.0f", 89},
+        // Ocean Milky Way reflection (2026-09-08). Appended at the next free index rather than
+        // slotted next to the other sky-feature gains: renumbering this table means renumbering
+        // hovCloudMinus/hovCloudPlus/draggingCloud/cloudBufs in lockstep, and those four have
+        // drifted apart before.
+        {"Ocean MW refl", &oceanMwReflGain, 0.0f, 8.0f, 0.1f, "%.2f", 90},
         {"Storm strength", &stormStrength, 0.0f, 1.0f, 0.05f, "%.2f", 25},
         {"Aurora gain", &auroraGain, 0.0f, 0.1f, 0.001f, "%.3f", 26},
         {"Aurora ground gain", &auroraGroundGain, 0.0f, 0.1f, 0.001f, "%.3f", 27},
@@ -3374,11 +3473,13 @@ void SatelliteSim::buildSettingsAttributionsTab(const UIInput &inp, UIRenderer &
 }
 
 // ─── buildViewControlsWindow ─────────────────────────────────────────────────
-// Quick-reference list of simulation controls. Shown by default on first run
-// (gated by showControlsOnStartup, applied once in init()); closable, but closing
-// only lasts for the current run — open state itself is not persisted. Uses the
-// same buildResizableWindow frame as the settings window (was a hand-rolled
-// near-duplicate before; now one window implementation).
+// Quick-reference list of simulation controls. No longer shown automatically on startup — it used
+// to (gated by a since-removed showControlsOnStartup setting), but user testing found almost nobody
+// closed it, so demo recordings consistently had it sitting in the top-left. Now closed by default
+// every launch and only opened via the "Show window" button in Settings > Controls
+// (buildSettingsControlsTab); closing it (or leaving it open) only lasts for the current run either
+// way — open state itself is not persisted. Uses the same buildResizableWindow frame as the
+// settings window (was a hand-rolled near-duplicate before; now one window implementation).
 void SatelliteSim::buildViewControlsWindow(const UIInput &inp, UIRenderer &ui)
 {
     buildResizableWindow(inp, ui, viewControlsChrome, 1, "Controls", true, hovViewControlsClose,
@@ -3573,14 +3674,21 @@ void SatelliteSim::buildIntroOverlay(const UIInput &inp, UIRenderer &ui)
                                                 .layoutDirection = CLAY_TOP_TO_BOTTOM},
                                             .floating = {.zIndex = 30, .attachTo = CLAY_ATTACH_TO_ROOT}})
         {
+            // No background panel here (deliberately — a translucent rounded rectangle used to sit
+            // behind this text; user testing found it read as UI clutter, especially since players
+            // rarely dismissed the intro quickly, so demo footage was full of it). A dedicated
+            // serif face was tried in its place (2026-09-08) but reverted the same day: the stbtt
+            // baked-bitmap atlas this renderer uses has no per-size re-rasterization (see
+            // UIRenderer::FontAtlas's bakedSize comment), and the serif face's hinting produced
+            // visibly misaligned glyphs at these large caption sizes (most obviously "2036"'s 3/6)
+            // once scaled up from the bake. Fixing that for real needs an SDF font atlas, not
+            // attempted here — regular UI font stays the only font for now.
             CLAY(CLAY_ID("IntroCaptionPanel"), {.layout = {
                                                     .sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
                                                     .padding = {24, 24, 16, 16},
                                                     .childGap = 4,
                                                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER},
-                                                    .layoutDirection = CLAY_TOP_TO_BOTTOM},
-                                                .backgroundColor = {0, 0, 0, (float)((int)textA * 110 / 255)},
-                                                .cornerRadius = CLAY_CORNER_RADIUS(6)})
+                                                    .layoutDirection = CLAY_TOP_TO_BOTTOM}})
             {
                 if (isYearBeat)
                 {
@@ -3733,6 +3841,12 @@ void SatelliteSim::applyGraphicsPreset(GraphicsPreset p)
     static constexpr uint32_t kBitTerrain = 1u, kBitOceanRefl = 8u, kBitAirglowRed = 16u,
                               kBitAurora = 32u, kBitBeams = 128u, kBitCloudShadow = 256u,
                               kBitBeamBlock = 512u, kBitFog = 2048u;
+    // Potato-only knockout bits (see CLAUDE.md "GPU Performance Profiling" bit table). Each has a
+    // documented math-safe fallback, same as the ones above.
+    static constexpr uint32_t kBitSceneDepth = 1024u, kBitBeamRayLoop = 8192u,
+                              kBitCirrusMarch = 16384u, kBitCloudMarch = 32768u,
+                              kBitSkyGlowLoop = 65536u, kBitMinimalSky = 262144u,
+                              kBitLiteSky = 524288u; // sat_sky.frag -DSKY_LITE variant (Planetarium)
 
     struct PresetValues
     {
@@ -3747,6 +3861,25 @@ void SatelliteSim::applyGraphicsPreset(GraphicsPreset p)
 
     switch (p)
     {
+    case GraphicsPreset::Potato:
+        // Below Planetarium, for machines that can't sustain the fullscreen raymarch at all
+        // (2015-era / integrated GPUs, MoltenVK translation). Everything Planetarium turns off,
+        // PLUS: the half-res scene-depth pass (bit 1024 — Earth is flat here anyway, nothing
+        // consumes real terrain depth), the per-pixel beam pointing-ray loop (8192), and the two
+        // volumetric-march compute kernels + the 64-bin sky-glow loop (16384/32768/65536 — all
+        // no-ops at cloudCoverage 0). Atmosphere scattering (bit 2) is deliberately LEFT ON —
+        // measured on a MoltenVK/GCN1 target it cost only a few ms while its absence removed the
+        // entire sky gradient. viewSamples at the floor so the atmosphere it keeps is cheap.
+        //
+        // renderScale 1.0, NOT 0.5: on MoltenVK the < 1.0 path adds a whole extra offscreen render
+        // pass + a vkCmdBlitImage into the swapchain every frame, and each is another command-
+        // encoder boundary — on this driver that costs more than the pixels it saves (which the
+        // knockout sweep already proved don't matter here). Matches CLAUDE.md's "prefer 100%".
+        v = {kBitTerrain | kBitOceanRefl | kBitAirglowRed | kBitAurora | kBitBeams | kBitCloudShadow |
+                 kBitBeamBlock | kBitFog | kBitSceneDepth | kBitBeamRayLoop |
+                 kBitCirrusMarch | kBitCloudMarch | kBitSkyGlowLoop | kBitMinimalSky,
+             1.0f, 0.0f, 64.0f, 2.0f, 6.0f, 20.0f, 2.0f, 3.0f, 5.0f, 3.0f, 50000.0f, 100000.0f, 5000.0f, 10000.0f};
+        break;
     case GraphicsPreset::Planetarium:
         // v1.0 experience: flat textured Earth (cloudCoverage 0 — no cloud layer at all), terrain
         // relief and ocean reflection off (the sea-level sphere / flat ocean fallbacks already
@@ -3756,8 +3889,17 @@ void SatelliteSim::applyGraphicsPreset(GraphicsPreset p)
         // flat-ocean fallback still uses, and are cheap enough to never scale down (user directive
         // 2026-08-04: "never compromise on ocean quality"); reflSamples is the one ocean slider
         // still turned down here since kBitOceanRefl makes it a true no-op at this tier.
-        v = {kBitTerrain | kBitOceanRefl | kBitAirglowRed | kBitAurora | kBitBeams | kBitCloudShadow | kBitBeamBlock | kBitFog,
-             1.0f, 0.0f, 64.0f, 2.0f, 6.0f, 48.0f, 2.0f, 3.0f, 5.0f, 3.0f, 50000.0f, 100000.0f, 5000.0f, 10000.0f};
+        // kBitLiteSky (SKY_OPTIMIZATION_PLAN.md Phase 1): sat_sky.frag compiled with -DSKY_LITE —
+        // Milky Way / 64-bin sky-glow loop / cirrus+high cloud layers / the 3x3 cloud rgb blur /
+        // aurora surface glow / per-atmosphere-step city-upwelling + airglow #ifdef'd out, for weak
+        // GPUs (2015 AMD via MoltenVK) where the full shader collapses fragment occupancy (measured
+        // 2 -> 22 FPS on the 2015 target). The full shader stays the default for Medium+ and any GPU
+        // that can run it. Phase 2: atmosphere march viewSamplesMin/Max 6/48 -> 4/10, and the two
+        // volumetric-cloud compute kernels knocked out (kBitCloudMarch/kBitCirrusMarch — coverage
+        // is 0 at this tier so they march nothing but still cost a dispatch + the sample below).
+        v = {kBitTerrain | kBitOceanRefl | kBitAirglowRed | kBitAurora | kBitBeams | kBitCloudShadow |
+                 kBitBeamBlock | kBitFog | kBitLiteSky | kBitCloudMarch | kBitCirrusMarch,
+             1.0f, 0.0f, 64.0f, 2.0f, 4.0f, 10.0f, 2.0f, 3.0f, 5.0f, 3.0f, 50000.0f, 100000.0f, 5000.0f, 10000.0f};
         break;
     case GraphicsPreset::Low:
         // Terrain stays on (a bare sea-level sphere with no relief reads as more "wrong" than
@@ -3818,6 +3960,10 @@ void SatelliteSim::applyGraphicsPreset(GraphicsPreset p)
     cloudDistFadeEndM = v.cloudFadeEndM;
     graphicsPreset = p;
 
+    if (std::getenv("SATLIGHTSIM_FRAME_TRACE"))
+        fprintf(stderr, "[sky] applyGraphicsPreset(%s): mask=%u renderScale=%.3f ctx_=%p\n",
+                kGraphicsPresetNames[(int)p], debugDisableMask, renderScale, (void *)ctx_);
+
     if (ctx_)
     {
         destroySkyLowResResources(ctx_->device);
@@ -3831,6 +3977,15 @@ void SatelliteSim::applyGraphicsPreset(GraphicsPreset p)
 // Must be called after initConstellation() so constellations[] is populated.
 void SatelliteSim::loadSettings()
 {
+#ifdef SAT_FRESH_SETTINGS
+    // Fresh-settings build (SatLightSimFresh / -DSAT_FRESH_SETTINGS): never read a persisted
+    // settings.json, so every launch is a genuine out-of-the-box first run. Still seed the
+    // graphics preset from the device the same way a real first run does (below), so what's
+    // being tested is the true default experience, not an unseeded High.
+    fprintf(stderr, "[SatelliteSim] FRESH build: ignoring any settings.json; using defaults.\n");
+    applyGraphicsPreset(seedGraphicsPresetFromDevice(*ctx_));
+    return;
+#endif
     auto path = (std::filesystem::path(userDataDir_) / "settings.json").string();
     std::ifstream f(path);
     if (!f.is_open())
@@ -3888,6 +4043,10 @@ void SatelliteSim::loadSettings()
         flareStreakGain = p.value("flare_streak_gain", flareStreakGain);
         mwPollutionThresholdLo = p.value("mw_pollution_threshold_lo", mwPollutionThresholdLo);
         mwPollutionThresholdHi = p.value("mw_pollution_threshold_hi", mwPollutionThresholdHi);
+        darkSkyCityMag = p.value("dark_sky_city_mag", darkSkyCityMag);
+        darkSkyTwilightMag0 = p.value("dark_sky_twilight_mag0", darkSkyTwilightMag0);
+        darkSkyTwilightEndDeg = p.value("dark_sky_twilight_end_deg", darkSkyTwilightEndDeg);
+        darkSkyTwilightAniso = p.value("dark_sky_twilight_aniso", darkSkyTwilightAniso);
         mwFadeInTimeS = p.value("mw_fade_in_time_s", mwFadeInTimeS);
         mwFadeOutTimeS = p.value("mw_fade_out_time_s", mwFadeOutTimeS);
         trailDecaySeconds = p.value("trail_decay_seconds", trailDecaySeconds);
@@ -3910,7 +4069,9 @@ void SatelliteSim::loadSettings()
             // above; this is a different case (file exists, schema matches, preset just never
             // existed as a concept yet).
             int presetVal = d.value("graphics_preset", (int)GraphicsPreset::Custom);
-            graphicsPreset = (presetVal >= 0 && presetVal <= 5) ? (GraphicsPreset)presetVal : GraphicsPreset::Custom;
+            graphicsPreset = (presetVal >= 0 && presetVal <= (int)GraphicsPreset::Potato)
+                                 ? (GraphicsPreset)presetVal
+                                 : GraphicsPreset::Custom;
             showAdvancedSettings = d.value("show_advanced_settings", showAdvancedSettings);
             debugDisableMask = (uint32_t)d.value("debug_disable_mask", (int64_t)debugDisableMask);
         }
@@ -3921,10 +4082,9 @@ void SatelliteSim::loadSettings()
         settingsActiveTab = std::clamp(d.value("active_tab", settingsActiveTab), 0, 11);
         int unitVal = d.value("unit_system", unitSystem == UnitSystem::Imperial ? 1 : 0);
         unitSystem = unitVal == 1 ? UnitSystem::Imperial : UnitSystem::Metric;
-        showControlsOnStartup = d.value("show_controls_on_startup", showControlsOnStartup);
-        // Feature preference, not a graphics-tuning value — unconditional like showControlsOnStartup
-        // above, not gated behind schemaMatches. trailClearPending stays true regardless (its own
-        // compiled-in default), so a trail-enabled load always starts from a blank buffer.
+        // Feature preference, not a graphics-tuning value — unconditional, not gated behind
+        // schemaMatches. trailClearPending stays true regardless (its own compiled-in default),
+        // so a trail-enabled load always starts from a blank buffer.
         trailEnabled = d.value("trail_enabled", trailEnabled);
         // UC3 follow-up: back to real persisted behavior now that the cinematic itself is settled
         // (the always-on-every-launch testing override is gone). "play_intro_on_startup" absent
@@ -3974,6 +4134,15 @@ void SatelliteSim::loadSettings()
     {
         timeScaleIdx = j["time"].value("scale_idx", timeScaleIdx);
         timeScaleIdx = std::clamp(timeScaleIdx, 0, kNumTimeScales - 1);
+    }
+
+    if (j.contains("controls"))
+    {
+        auto &ctl = j["controls"];
+        invertMouseX = ctl.value("invert_mouse_x", invertMouseX);
+        invertMouseY = ctl.value("invert_mouse_y", invertMouseY);
+        invertPadX = ctl.value("invert_pad_x", invertPadX);
+        invertPadY = ctl.value("invert_pad_y", invertPadY);
     }
 
     if (j.contains("controls") && j["controls"].contains("keybindings"))
@@ -4077,6 +4246,9 @@ void SatelliteSim::loadSettings()
         airglowSodiumGain = c.value("airglow_sodium_gain", airglowSodiumGain);
         airglowCoverageGain = c.value("airglow_coverage_gain", airglowCoverageGain);
         airglowPolarGain = c.value("airglow_polar_gain", airglowPolarGain);
+        zodiacalGain = c.value("zodiacal_gain", zodiacalGain);
+        oceanMwReflGain = c.value("ocean_mw_refl_gain", oceanMwReflGain);
+        zodiacalWidthDeg = c.value("zodiacal_width_deg", zodiacalWidthDeg);
         cloudShadowMaxDistM = c.value("shadow_max_dist_m", cloudShadowMaxDistM);
         cloudMaxRenderDistM = c.value("max_render_dist_m", cloudMaxRenderDistM);
         viewSamplesMin = c.value("view_samples_min", viewSamplesMin);
@@ -4156,6 +4328,10 @@ void SatelliteSim::loadSettings()
 // Called on cleanup() and when the settings window is closed.
 void SatelliteSim::saveSettings()
 {
+#ifdef SAT_FRESH_SETTINGS
+    // Fresh-settings build: never persist, so the next launch stays pristine. See loadSettings().
+    return;
+#endif
     if (userDataDir_.empty())
         return;
 
@@ -4179,6 +4355,10 @@ void SatelliteSim::saveSettings()
         {"flare_streak_gain", flareStreakGain},
         {"mw_pollution_threshold_lo", mwPollutionThresholdLo},
         {"mw_pollution_threshold_hi", mwPollutionThresholdHi},
+        {"dark_sky_city_mag", darkSkyCityMag},
+        {"dark_sky_twilight_mag0", darkSkyTwilightMag0},
+        {"dark_sky_twilight_end_deg", darkSkyTwilightEndDeg},
+        {"dark_sky_twilight_aniso", darkSkyTwilightAniso},
         {"mw_fade_in_time_s", mwFadeInTimeS},
         {"mw_fade_out_time_s", mwFadeOutTimeS},
         {"trail_decay_seconds", trailDecaySeconds},
@@ -4194,7 +4374,6 @@ void SatelliteSim::saveSettings()
         {"debug_disable_mask", debugDisableMask},
         {"active_tab", settingsActiveTab},
         {"unit_system", unitSystem == UnitSystem::Imperial ? 1 : 0},
-        {"show_controls_on_startup", showControlsOnStartup},
         {"play_intro_on_startup", playIntroOnStartup},
         {"trail_enabled", trailEnabled}};
     if (settingsChrome.x >= 0.0f)
@@ -4257,6 +4436,9 @@ void SatelliteSim::saveSettings()
         {"airglow_sodium_gain", airglowSodiumGain},
         {"airglow_coverage_gain", airglowCoverageGain},
         {"airglow_polar_gain", airglowPolarGain},
+        {"zodiacal_gain", zodiacalGain},
+        {"ocean_mw_refl_gain", oceanMwReflGain},
+        {"zodiacal_width_deg", zodiacalWidthDeg},
         {"shadow_max_dist_m", cloudShadowMaxDistM},
         {"max_render_dist_m", cloudMaxRenderDistM},
         {"view_samples_min", viewSamplesMin},
@@ -4317,6 +4499,10 @@ void SatelliteSim::saveSettings()
     for (const auto &kb : keybindings)
         kbArr.push_back({{"action", kb.action}, {"key", kb.key}, {"gp_button", kb.gpButton}});
     j["controls"]["keybindings"] = kbArr;
+    j["controls"]["invert_mouse_x"] = invertMouseX;
+    j["controls"]["invert_mouse_y"] = invertMouseY;
+    j["controls"]["invert_pad_x"] = invertPadX;
+    j["controls"]["invert_pad_y"] = invertPadY;
 
     nlohmann::json constArr = nlohmann::json::array();
     for (const auto &c : constellations)

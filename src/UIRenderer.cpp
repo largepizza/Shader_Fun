@@ -169,12 +169,33 @@ void UIRenderer::init(VulkanContext& ctx, GLFWwindow* window) {
 // loadFont
 // ─────────────────────────────────────────────────────────────────────────────
 void UIRenderer::loadFont(VulkanContext& ctx) {
-    // Try Windows system fonts in order of preference.
-    // Customize this list if deploying on non-Windows systems.
+    // System font search paths, in order of preference, per platform. First readable file wins;
+    // missing paths just fail the fopen() below, so listing every platform here is harmless.
     const char* candidates[] = {
+#if defined(_WIN32)
         "C:/Windows/Fonts/segoeui.ttf",
         "C:/Windows/Fonts/arial.ttf",
         "C:/Windows/Fonts/consola.ttf",
+#elif defined(__APPLE__)
+        // .ttf only — stbtt_BakeFontBitmap() below is called with byte-offset 0, which is
+        // wrong for a .ttc collection (Helvetica.ttc etc.), so those are deliberately excluded.
+        // stbtt_InitFont() does go through stbtt_GetFontOffsetForIndex() and would handle a .ttc,
+        // which is why this only breaks at bake time, silently, with garbage glyphs.
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Geneva.ttf",
+        "/Library/Fonts/Arial.ttf",
+#else // Linux / other
+        // Distro layouts differ (Fedora, Ubuntu/Debian, Arch all package these differently).
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/noto-sans/NotoSans-Regular.ttf",
+#endif
     };
 
     std::vector<uint8_t> ttfData;
@@ -192,10 +213,14 @@ void UIRenderer::loadFont(VulkanContext& ctx) {
         found = true;
         break;
     }
-    if (!found)
+    if (!found) {
+        std::string tried;
+        for (const char* path : candidates) { tried += path; tried += ", "; }
         throw std::runtime_error(
-            "UIRenderer: Could not find a TTF font. Tried segoeui.ttf, arial.ttf, consola.ttf "
-            "in C:/Windows/Fonts/. Please set a valid font path in UIRenderer.cpp.");
+            "UIRenderer: Could not find a system TTF font for this platform. Tried: " + tried +
+            "Install one of these, or add a valid path to the candidates[] list in "
+            "UIRenderer.cpp::loadFont().");
+    }
 
     font.fileData = std::move(ttfData);
 

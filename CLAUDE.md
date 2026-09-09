@@ -23,6 +23,80 @@ Shaders: auto-detected glob (`shaders/*.vert|.frag|.comp`), compiled by `glslc`,
 
 **Requirements**: Vulkan SDK + `VULKAN_SDK` env var, CMake 3.20+, MSVC C++20.
 
+### Presets and release packaging
+
+`CMakePresets.json` holds every per-platform configuration (`windows` / `linux` / `macos`, plus
+`*-release` variants and `macos-universal-release`). **It is committed and must stay free of
+absolute paths** — machine-specific values go in `CMakeUserPresets.json`, which is gitignored.
+`.vscode/settings.json` and `launch.json` are committed too and are under the same rule; a
+hardcoded `cmake.cmakePath` and `VULKAN_SDK` under a developer's home directory shipped there once
+(2026-09, macOS-potato branch) and reached the public repo's history.
+
+`cmake --build <dir> --target package-release` stages and archives the distributable into `dist/`.
+`cmake/PackageRelease.cmake` holds the copy list — **the only copy of it**. `.github/workflows/
+release.yml` and `release.bat` both drive that target rather than repeating the list, which they
+previously did five times over (3 CI jobs + 2 batch branches) and had already drifted. On macOS the
+same script bundles the Vulkan loader + MoltenVK into `lib/` and writes the launcher `.command`
+(there is no system Vulkan on macOS; the exe's baked-in `$VULKAN_SDK` path exists only on the build
+machine).
+
+**`CMAKE_POLICY_VERSION_MINIMUM 3.5` at the top of CMakeLists.txt is load-bearing, not cosmetic.**
+CMake 4.0 turned `cmake_minimum_required(VERSION <3.5)` from a deprecation warning into a hard
+configure error, and two FetchContent deps still declare one (glfw 3.4 → `3.4...3.28`,
+nlohmann/json v3.11.3 → `3.1...3.14`). Without it, a stock CMake 4 — Homebrew's default, and
+increasingly Windows'/Linux's — cannot configure this project at all. That failure is what the
+committed absolute path to a portable CMake 3.31 was working around.
+
+### macOS release architecture
+
+The macOS CI job builds a **universal binary** (`CMAKE_OSX_ARCHITECTURES="arm64;x86_64"`) with
+`CMAKE_OSX_DEPLOYMENT_TARGET=11.0`. Both are required and they fix *different* failures:
+- **Architecture.** `macos-14` runners are Apple Silicon, so a default build is arm64-only and an
+  Intel Mac rejects it with **"bad CPU type in executable"** — the kernel refusing to exec a Mach-O
+  with no slice for the host, before any of this app's code runs. Universal is preferred over a
+  second `macos-13` Intel runner job because GitHub is retiring those images, and it ships one
+  download instead of making players choose.
+- **Deployment target.** Without it clang stamps the *build* machine's OS version, and a
+  macOS 14-targeted binary is refused on Monterey (12.x) with "not supported on this version of
+  macOS" — the error that surfaces *next* once the CPU-type one is fixed.
+
+The workflow's `lipo -archs` step fails the build if either slice is missing from the exe **or from
+the bundled dylibs** — LunarG ships universal dylibs, but that is a property of their build, not
+something this workflow controls.
+
+### Old / low-end hardware floor
+
+The 128-byte push-constant trim (see "Subsystem: Weak-Hardware Sky Tiers") is one of several places
+this project sits above a Vulkan *guaranteed minimum*. `VulkanContext::logDeviceLimits()` logs all
+of them every launch and throws a named error when one is short, so a report from a machine nobody
+has access to is answerable. Current margins:
+
+| Limit | Guaranteed min | This app needs | Why |
+|---|---|---|---|
+| `maxPushConstantsSize` | 128 | **128** | every PC struct static_asserts to exactly 128 |
+| `maxImageDimension2D` | 4096 | **14999** | `earth_elevation.png` is 14999×7500 (GCN1/Metal cap is 16384 — little headroom) |
+| `maxImageDimension3D` | 256 | **1024** | `aurora_noise.comp` bakes a 1024×16×256 volume |
+| `maxComputeWorkGroupInvocations` | 128 | **256** | `local_size 16×16` in cloud_march / scene_depth / flare_blur |
+| `maxComputeSharedMemorySize` | 16 KB | ~5.2 KB | tile-cull lists — comfortable |
+| `maxPerStageDescriptorStorageBuffers` | 4 | **6** | `sat_sky.frag`'s set; MoltenVK is the realistic place to hit it, since it maps SSBOs + UBOs + vertex buffers into Metal's 31 per-stage buffer slots |
+| `maxPerStageDescriptorSampledImages` | 16 | 15 | `sat_sky.frag` — one binding from the floor |
+
+**The push-constant gate in `pickPhysicalDevice()` read 144 until 2026-09-08** — the pre-trim
+`SatDrawPC` size — so it rejected precisely the hardware the trim was performed for. Keep that
+constant equal to the largest PC struct; if one grows past 128 the fix is the CloudParams UBO, not
+a bigger number there.
+
+Two more non-guaranteed things are now checked rather than assumed: device **features** are
+verified present before `vkCreateDevice` (requesting an unsupported one fails with
+`VK_ERROR_FEATURE_NOT_PRESENT` and no indication of which), and **linear blit filtering** is a
+per-format optional feature, so `VulkanContext::bestBlitFilter()` picks LINEAR/NEAREST per format
+for both mipmap generation and the `renderScale < 1.0` upscale — the latter being the path that
+exists *for* weak hardware, the least safe place to assume the optional feature.
+
+VRAM is the untested one: the shipped textures are roughly 500 MB of GPU memory before mips
+(8K day/night/clouds/specular/Milky Way + the 14999×7500 R8 DEM ≈ 112 MB on its own), against
+2 GB on a 2015 MacBook Pro R9 M370X. Nothing streams or downsamples them.
+
 ---
 
 ## Architecture
@@ -424,13 +498,37 @@ moonDirECI (vec3), pad1 (float)        — offset 112/124
 (binding 3 in the sat_flare.comp descriptor set, 8 floats, host-visible/mapped), which doesn't
 need push-constant space. See "Subsystem: Light Pollution Dome" below.
 
-**SatDrawPC** (112 bytes) — sat_point.vert + both sky shaders:
+**SatDrawPC** (128 bytes) — `sat_sky.vert`/`.frag` (+ `_lite`/`_minimal`) via `skyBgPipeLayout`:
 ```
 skyView (mat4)                          — offset 0
-fovYRad, aspect, pad[2]                 — offsets 64/68/72/76
+fovYRad, aspect, gmst, waveTime         — offsets 64/68/72/76
 sunDirENU (vec4) — xyz=dir, w=sin(el)  — offset 80
 moonDirENU (vec4) — xyz=dir, w=illum   — offset 96
+obsECEFDir (vec4) — xyz=ECEF, w=obsHeightOffset — offset 112
 ```
+Exactly the 128-byte `maxPushConstantsSize` floor (oldest AMD integrated parts). Everything that
+used to trail past offset 128 — `debugDisableMask`, `screenSizePx`, `skyGlareVisibility`, the four
+`beam*` scalars, `mwSuppressEased` — was per-frame-uniform and moved into the **CloudParams UBO**
+(`cloud_params.glsl` / `GpuCloudParams` "Push-constant relief" block): `sat_sky.frag` reads them as
+`cloud.dbgDisableMask` / `vec2(cloud.skyScreenW, cloud.skyScreenH)` / `cloud.skyGlareVisibility` /
+`cloud.beam*` / `cloud.mwSuppressEased`. `buildSkyDrawPC()` fills it.
+
+**PointDrawPC** (128 bytes) — `sat_point.vert`/`.frag` (`drawPipeLayout`) + `star_point.vert`/`.frag`
+(`starPipeLayout`, also planets/trail):
+```
+skyView (mat4)                          — offset 0
+fovYRad, aspect, waveTime, noTwinkle    — offsets 64/68/72/76
+moonDirENU (vec4)                       — offset 80
+obsECEFDir (vec4) — w=obsHeightOffset   — offset 96
+screenSizePx (vec2)                     — offset 112   (always ctx.swapExtent — point draws never scale)
+debugDisableMask (uint)                 — offset 120   (only sat_point.frag's knockout bit 4096)
+manualTerrainTest (float)               — offset 124   (1 on the trail draws only)
+```
+Split from `SatDrawPC` so both point pipeline layouts fit 128 bytes while still carrying the two
+per-draw flags that genuinely can't be frame-UBO'd: `noTwinkle`=1 on the planet draw, and
+`manualTerrainTest`=1 on the trail draws — both differ between draws within one frame.
+`buildPointDrawPC()` fills it; callers set the two flags. Each point shader declares only the
+prefix it reads.
 
 ---
 
@@ -1055,8 +1153,10 @@ right after the star draw. Reusing the pipeline object means `onResize()`'s exis
 `createStarPipeline()` recreation covers planets for free — no separate resize handling needed.
 One real shader difference was necessary: `star_point.vert`'s atmospheric scintillation/twinkle is
 physically wrong for planets (small resolved discs, not point sources) — gated behind a new
-`SatDrawPC.noTwinkle` field (offset 164, struct grown 164→168 bytes, same "append at the end"
-precedent as `debugDisableMask`), set to 1 only on the planet draw's own copy of the push constant.
+`noTwinkle` field, set to 1 only on the planet draw's own copy of the push constant. (Originally
+`SatDrawPC.noTwinkle` at offset 164; now `PointDrawPC.noTwinkle` at offset 76 after the
+128-byte push-constant split — see the **PointDrawPC** entry under "Subsystem: GPU Orbital
+Pipeline".)
 The pre-existing Moon-disc occlusion cull in the same shader stays active for planets unchanged
 (correct — a planet behind the Moon's disc should still be culled).
 
@@ -1157,8 +1257,10 @@ one bucket can be timed at several sites or inside a loop). `beginCpuFrameTiming
 resulting one-frame staleness deliberately matches `gpuMsRaw[]`'s, which is what lets a sweep step
 sample a CPU frame and a GPU frame from the same moment instead of one lagging the other.
 
-**Perf knockout toggles**: `debugDisableMask` (uint32, in both `SatDrawPC` and `CloudMarchPC` — see
-their own entries above) is a profiling-only bitmask. Checkboxes in Settings → Display →
+**Perf knockout toggles**: `debugDisableMask` (uint32) is a profiling-only bitmask. It rides in the
+CloudParams UBO as `cloud.dbgDisableMask` (read by `sat_sky.frag` and `cloud_march.comp`), plus a
+copy in `PointDrawPC` for `sat_point.frag`'s bit 4096 — all pushed from the single
+`SatelliteSim::debugDisableMask` member each frame. Checkboxes in Settings → Display →
 "KNOCKOUT PROFILING" (18 as of 2026-08-10, driven by the single `kDebugToggles` table at the top of
 `SatelliteSimUI.cpp` — bit, display label, and stable JSON key per row; adding a row there adds a
 checkbox AND a sweep step for free) each disable one shader block or dispatch — each with a mathematically-safe
@@ -1179,7 +1281,11 @@ cloud occlusion (`sat_point.frag` — added 2026-08-09 to isolate a reported per
 8192=Reflect-Orbital beam POINTING-RAY loop (`cloud_march.comp`'s per-pixel loop in `main()`),
 16384=`cirrusMarchCS`, 32768=`cloudMarchCS` (the volumetric low/mid march itself),
 65536=`sat_sky.frag`'s 64-bin satellite sky-glow loop, 131072=**beam tile cull OFF** (not a feature
-knockout — an optimization A/B; see "Beam pointing-ray tile culling" below).
+knockout — an optimization A/B; see "Beam pointing-ray tile culling" below),
+262144=**Potato sky** (swap `skyBgPipeline` → `skyBgMinimalPipeline`), 524288=**SKY_LITE sky**
+(swap → `skyBgLitePipeline`) — see "Subsystem: Weak-Hardware Sky Tiers". These last two are
+pipeline swaps, not in-shader branches; they're set by the Potato / Planetarium presets and are
+NOT part of the `kDebugToggles` sweep.
 
 **Bits 8192-65536 were added 2026-08-10** for the Anchorage worst-case profiling session, and all
 four cover blocks that previously had NO knockout, so their cost was permanently invisible inside a
@@ -1294,18 +1400,20 @@ targets, not always the full swapchain — a real bug shipped and was fixed same
 composite sample divided `gl_FragCoord.xy` by `textureSize(cloudTargetA,0)*2.0` (an assumed full-
 res constant, since `cloud_march.comp`'s own dispatch is unaffected by `renderScale`), which
 silently broke the moment the background could render into a smaller offscreen target — clouds
-drifted off-center, fully distorted at 50%. Fixed via a new `SatDrawPC` field, `screenSizePx`
-(THIS draw's actual target size — `skyLowResExtent` when pre-rendering scaled,
-`ctx.swapExtent` everywhere else) — any `[0,1]`-normalized UV derived from `gl_FragCoord` must
-divide by `pc.screenSizePx`, never an assumed constant. (A fixed-frequency noise seed like the
-terrain-march jitter lookup, `gl_FragCoord.xy * (1.0/128.0)`, is fine as-is — no total-resolution
-assumption baked in, not a normalized UV.)
+drifted off-center, fully distorted at 50%. The sky render-target size is now `cloud.skyScreenW`/
+`skyScreenH` in the CloudParams UBO (`skyLowResExtent` when the scaled prepass runs — recordPrePass
+and recordDraw's Pass 1 are mutually exclusive, so one per-frame value suffices — else
+`ctx.swapExtent`); any `[0,1]`-normalized UV in `sat_sky.frag` derived from `gl_FragCoord` divides
+by `vec2(cloud.skyScreenW, cloud.skyScreenH)`, never an assumed constant. (A fixed-frequency noise
+seed like the terrain-march jitter lookup, `gl_FragCoord.xy * (1.0/128.0)`, is fine as-is — no
+total-resolution assumption baked in, not a normalized UV.) The point shaders (`sat_point.frag`/
+`star_point.frag`) never render scaled, so they keep a plain `screenSizePx` (= `ctx.swapExtent`) in
+`PointDrawPC`.
 
-`SatDrawPC` grew 132→144 bytes for `screenSizePx` — needed an explicit `pad0` float first, since
-GLSL's `push_constant` block requires 8-byte alignment for a `vec2` that C++ doesn't insert
-automatically. `buildSatDrawPC(ctx, targetExtent)` factors out the shared push-constant fill
-between `recordPrePass` and `recordDraw` so `aspect` (always the true screen aspect) and
-`screenSizePx` (always this draw's real target) can't drift apart between the two call sites.
+`screenSizePx` originally lived in `SatDrawPC` (which grew 132→144 for it); it moved to the
+CloudParams UBO / `PointDrawPC` in the 128-byte push-constant split. `buildSkyDrawPC(ctx)` /
+`buildPointDrawPC(ctx)` fill the two draw push constants; the CloudParams UBO fill in
+`recordCompute()` sets `skyScreenW`/`H` from `renderScale`.
 
 See `TERRAIN_PLAN.md` session 29 log for the full design writeup and the bug's root-cause
 narrative.
@@ -1316,6 +1424,67 @@ are fixed at half the SWAP extent and do not scale, so at 1920x1009 dropping to 
 (beam occlusion gone, layers clamped at march time), 100% and 50% measure comparably in practice —
 and 100% additionally gets exact hardware-depth occlusion for satellites/stars. Prefer 100%. If
 render scale needs to matter again, the fix is making those two compute passes scale with it.
+
+---
+
+## Subsystem: Weak-Hardware Sky Tiers (Potato / SKY_LITE)
+
+`sat_sky.frag` is ~2900 lines. On a **2015 MacBook Pro (AMD Radeon R9 M370X / GCN 1.0, macOS 12,
+MoltenVK)** it compiles to one Metal fragment function whose register pressure collapses wavefront
+occupancy — measured **~490 ms/frame, the entire frame**. This is not tunable by any quality slider
+or `debugDisableMask` bit: those skip *execution*, not compiled *size*, and the constraint is peak
+VGPR count + total texture-fetch latency that must be hidden, not instruction count. See
+`SKY_OPTIMIZATION_PLAN.md` for the full investigation and `.gputrace` capture workflow
+(`tools/make_capture_bundle.sh` — needs full Xcode to read).
+
+Two stand-in fragment shaders, both bound through **`skyBgPipeLayout` / `skyDescSet` unchanged**
+(each declares only the bindings it reads) and selected in `recordDraw()` Pass 1 by
+`debugDisableMask` bit:
+
+| Tier | Bit | Pipeline | Shader | Notes |
+|---|---|---|---|---|
+| **Potato** | `262144` | `skyBgMinimalPipeline` | `shaders/sat_sky_minimal.frag` (own file, ~370 lines) | closed-form analytic atmosphere (Kasten-Young airmass, one 32-tap arithmetic loop — no raymarch), day/night + city-detail textures, one flat drifting cloud shell w/ terminator lighting, cheap ocean (1 noise-tap slope + Fresnel + Blinn glint), textured moon, verbatim `lensFlare()`. **~60 FPS.** No Milky Way / volumetric clouds / aurora / airglow / real ocean waves — those don't fit the GCN1 occupancy ceiling (~31–32 KB SPV; the Milky Way's `atan2`/`asin` + panorama fetch is the specific thing that broke it). |
+| **SKY_LITE** | `524288` | `skyBgLitePipeline` | `sat_sky.frag` **recompiled with `-DSKY_LITE`** → `sat_sky_lite.frag.spv` (2nd `add_custom_command` in CMakeLists) | `#ifdef SKY_LITE` cuts inside the real shader: Milky Way block, 64-bin satellite sky-glow loop, cloud layer loop `3→0` becomes `1→0`, the 3×3 `cloudTargetA/B` rgb blur → single tap, aurora surface glow (`auroraGlowAt` on terrain+ocean), zenith-ambient `N_ZT` 4→2, and the per-atmosphere-step **green/sodium airglow** (two `warpPerlin3` masks/step — the dominant cost) — city-glow upwelling KEPT but only on the first 3 march steps. **2 FPS → ~55 FPS** on the target. |
+
+262144 wins if both bits are set. The always-on `Log::line` breadcrumb in `recordDraw` reports
+`MINIMAL` / `LITE (SKY_LITE)` / `FULL sat_sky.frag` on any change (into `satlight_log.txt`) — this
+is also the instrument for `potato-mode-intermittent-slow-start` (see memory).
+
+**Preset wiring** (`applyGraphicsPreset`, `SatelliteSimUI.cpp`): **Potato** sets `kBitMinimalSky`
+plus every compute-side knockout; **Planetarium** sets `kBitLiteSky` + `kBitCloudMarch |
+kBitCirrusMarch` (coverage 0 at that tier) + `viewSamplesMin/Max 4/10`. Medium and up keep the full
+shader unchanged. `GraphicsPreset::Potato` is enum value 6 (appended after `Custom` to preserve
+persisted int indices); `kGraphicsPresetNames` and the preset-row UI list it first.
+
+`skyLowResPipeline` (renderScale < 1.0 prepass) is **not** given a lite/minimal variant — both
+those presets force `renderScale = 1.0`, so the prepass never runs for them.
+
+### All-platform changes that came out of this pass (land on `main`, not tier-gated)
+
+- **Sun corona bridge** (`sat_sky.frag` "Sun disc + atmospheric corona"): three stacked
+  `pow(cosA, 1800/320/55)` lobes peaking at ~disc brightness, added between the hard disc and the
+  `×0.12` wide `corona` Gaussian. Without it the disc dropped straight to the dim corona at its
+  edge — a hard brightness step that read post-tonemap as a dark ring / "cutout." Same shape as
+  `sat_sky_minimal.frag`'s Potato corona so the tiers match.
+- **Moon `squish` dead code removed**: the disabled (`squish = 0`) atmospheric-refraction block
+  still ran an `asin` + (below 15° elevation) two `tan` + `radians` to feed the identity
+  `dir.z * (1.0 + 0.0)`. Gone; ray/disc intersection uses `dir` directly.
+- **Cloud-shadow blur 5×5 → 3×3** (`kShadowBlurSpread = 1.7` keeps the ~radius-2 footprint;
+  centre tap reuses the already-sampled `cloudBCenter.a`): −17 texture samples on every ground-hit
+  pixel, the largest sample-count cut in the file. If ocean graininess returns, strengthen
+  `cloudGroundShadow`'s dither in `cloud_march.comp` rather than widening this back out.
+- **Push constants trimmed to the 128-byte `maxPushConstantsSize` floor** (2026-09-07). The same
+  old AMD integrated parts that need Potato/Planetarium also report exactly the Vulkan-guaranteed
+  minimum `maxPushConstantsSize` of 128, and `SatDrawPC` (176) / `CloudMarchPC` (148) both blew
+  past it — the app could not create those pipeline layouts at all. `SatDrawPC` split into a
+  128-byte sky core + a new 128-byte `PointDrawPC` for the point pipelines; `CloudMarchPC` trimmed
+  to 128. Every per-frame-uniform tail field (`debugDisableMask`, `screenSizePx`,
+  `skyGlareVisibility`, the `beam*` scalars, `mwSuppressEased`, `showBeamDebugRays`,
+  `cloudShadowRangeM`) moved into the CloudParams frame UBO — see the **SatDrawPC** / **PointDrawPC**
+  entries under "Subsystem: GPU Orbital Pipeline → Push constants" and the "Push-constant relief"
+  block in `GpuCloudParams`. **Consequence for future work:** `SatOrbitPC` and `SatFlarePC` are
+  already at exactly 128 — any new push-constant field on any of these structs must go in a UBO,
+  not the push constant. Prefer the CloudParams UBO where the consumer already binds it.
 
 ---
 
@@ -1526,10 +1695,12 @@ Read it at the start of any terrain-related session before making changes.
   were the real dominant costs. See `TERRAIN_PLAN.md` session 24 log for the original follow-up,
   session 29 log for the profiling toolkit and the corrected picture, and "Subsystem: GPU
   Performance Profiling" below for how to re-run this kind of investigation.
-- `SatDrawPC` is 132 bytes: `obsECEFDir (vec4)` at offset 112 (xyz = observer ECEF unit vector,
-  w = obsHeightOffset), `debugDisableMask (uint)` at offset 128 (perf knockout toggles, session 29
-  — see "Subsystem: GPU Performance Profiling"). `CloudMarchPC` is also 132 bytes for the same
-  reason (mirrors `debugDisableMask` — only the aurora/airglow-red bits are meaningful there).
+- `SatDrawPC`, `PointDrawPC` and `CloudMarchPC` are all exactly **128 bytes** — the
+  `maxPushConstantsSize` floor. `debugDisableMask` and the other per-frame tail fields ride in the
+  CloudParams UBO now (`cloud.dbgDisableMask` etc.); see the **SatDrawPC** / **PointDrawPC** entries
+  under "Subsystem: GPU Orbital Pipeline → Push constants" and the "Push-constant relief" block in
+  `GpuCloudParams`. Both point pipeline layouts (`drawPipeLayout`, `starPipeLayout`) use
+  `sizeof(PointDrawPC)`; `skyBgPipeLayout` uses `sizeof(SatDrawPC)`.
 - Sky descriptor set has 22 bindings (0-21): GlowBuf, noise, moon, earthDay, earthNight, earthElev, earthSpec, earthClouds, cloudNoiseTex (sampler3D), CloudParams UBO, half-res cloud march targets A/B, lightDomeBuf, milkyWayTex, cityDayDetail, cityNightDetail, auroraNoiseTex (sampler3D), reflectBeamsBuf, beamGlowDomeBuf, sceneDepthTex, oceanGlintBuf, groundBeamsBuf. Binding 18 was `cloudShadowTex` until that pass was deleted; 19/20 were compacted down into 18/19 rather than leaving a hole, since the C++ side fills its binding array contiguously. groundBeamsBuf (21, perf follow-up) is the CPU-compacted, observer-range-culled subset of reflectBeamsBuf that sat_sky.frag's ground-spot loop reads instead of the raw (up to 2048-entry) buffer — see GpuGroundBeams in SatelliteSim.h. **As of 2026-08-10 its entries are `GpuGroundBeam` (32 bytes), not raw `GpuReflectBeam`** — a pre-solved record, see "Beam ground-spot CPU hoist" below
 - GPU-side observer ground height lookup added; CPU observer height also corrected (see elevation encoding below)
 - `sat_sky.frag` ground path: terrain march step count is path-length-adaptive as of session 29
