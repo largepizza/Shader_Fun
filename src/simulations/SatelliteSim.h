@@ -2854,7 +2854,17 @@ private:
     // Fine (slow) movement mode — flipped by KB_MOVE_FINE (dispatchKeyAction). A toggle rather
     // than a held modifier (unlike KB_MOVE_BOOST): holding a stick-click down while also using
     // that same stick to move is uncomfortable, so a single press latches slow movement on/off.
+    // Cleared whenever KB_MOVE_BOOST (sprint) is active — the two are contradictory intents.
     bool fineMoveToggled = false;
+
+    // Look-axis inversion (persisted, Settings > Controls). Applied where the frame's mouse
+    // dmx/dmy and the gamepad right-stick look deltas are CONSUMED, not at the input callbacks —
+    // so the raw accumulators and the gamepad virtual-cursor path (which reuses the right stick)
+    // stay untouched.
+    bool invertMouseX = false;
+    bool invertMouseY = false;
+    bool invertPadX = false;
+    bool invertPadY = false;
 
     // ── UI hover state (one-frame lag) ────────────────────────────────────────
     std::vector<bool> hovConst;           // one entry per constellation; sized in loadDefinitions()
@@ -2873,6 +2883,8 @@ private:
     bool hovUnitMetric = false;
     bool hovUnitImperial = false;
     bool hovOpenControlsWindow = false; // Controls tab's "Open Controls Reference" button
+    bool hovInvertMouseX = false, hovInvertMouseY = false; // Controls tab look-invert toggles
+    bool hovInvertPadX = false, hovInvertPadY = false;
     bool hovTab[12] = {}; // one per settings-window tab (kSettingsTabNames)
     bool hovScaleMinus = false;
     bool hovScalePlus = false;

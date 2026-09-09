@@ -220,52 +220,75 @@ list(APPEND SPV_FILES ${SKY_LITE_SPV})
 add_custom_target(CompileShaders ALL DEPENDS ${SPV_FILES})
 add_dependencies(SatLightSim CompileShaders)
 
-# Copy compiled shaders next to the executable
-add_custom_command(TARGET SatLightSim POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${SHADER_OUT_DIR}
-        $<TARGET_FILE_DIR:SatLightSim>/shaders
-    COMMENT "Copying shaders to output directory"
-)
-
-# Copy data files next to the executable on every build when the source changes.
-# Both files are tracked in source control; copy_if_different keeps the output
-# in sync without unnecessary writes when nothing has changed.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/data")
-    add_custom_command(TARGET SatLightSim POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/data/constellations.schema.json"
-            "$<TARGET_FILE_DIR:SatLightSim>/constellations.schema.json"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/data/constellations.json"
-            "$<TARGET_FILE_DIR:SatLightSim>/constellations.json"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/data/reflector_targets.json"
-            "$<TARGET_FILE_DIR:SatLightSim>/reflector_targets.json"
-        COMMENT "Copying data files to output directory"
-    )
+# ── Fresh-settings variant ───────────────────────────────────────────────────
+# Same binary as SatLightSim, compiled with SAT_FRESH_SETTINGS so loadSettings()/saveSettings()
+# are no-ops: every launch starts from the compiled-in defaults (with a device-seeded graphics
+# preset, exactly like a genuine first run), letting the out-of-box UX be tested without deleting
+# settings.json by hand. EXCLUDE_FROM_ALL so a normal build never pays the second full compile —
+# build it explicitly (or just launch it; VS Code / an IDE will build it on demand):
+#   cmake --build build --target SatLightSimFresh
+option(SAT_BUILD_FRESH_TARGET "Also expose the fresh-settings (no-persist) executable target" ON)
+if(SAT_BUILD_FRESH_TARGET)
+    add_executable(SatLightSimFresh EXCLUDE_FROM_ALL ${SOURCES})
+    set_target_properties(SatLightSimFresh PROPERTIES OUTPUT_NAME "${EXE_BASENAME}_FRESH")
+    target_compile_definitions(SatLightSimFresh PRIVATE SAT_FRESH_SETTINGS)
+    target_include_directories(SatLightSimFresh PRIVATE src ${clay_SOURCE_DIR} ${stb_SOURCE_DIR} ${miniaudio_SOURCE_DIR} "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    target_link_libraries(SatLightSimFresh PRIVATE Vulkan::Vulkan glfw glm::glm nlohmann_json::nlohmann_json Threads::Threads)
+    if(APPLE)
+        target_link_libraries(SatLightSimFresh PRIVATE
+            "-framework CoreFoundation" "-framework CoreAudio" "-framework AudioToolbox")
+    endif()
+    add_dependencies(SatLightSimFresh CompileShaders)
 endif()
 
-# Copy assets (icons, textures, etc.) next to the executable
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
-    add_custom_command(TARGET SatLightSim POST_BUILD
+# Stage the compiled shaders + runtime data/assets/licenses next to a target's exe. Shared by
+# SatLightSim and SatLightSimFresh (both land in the same output dir, so whichever builds last
+# wins — the content is identical). Keep this the single copy of the list.
+function(sat_copy_runtime_files tgt)
+    add_custom_command(TARGET ${tgt} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/assets"
-            "$<TARGET_FILE_DIR:SatLightSim>/assets"
-        COMMENT "Copying assets to output directory"
+            ${SHADER_OUT_DIR}
+            $<TARGET_FILE_DIR:${tgt}>/shaders
+        COMMENT "Copying shaders next to ${tgt}"
     )
-endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/data")
+        add_custom_command(TARGET ${tgt} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/data/constellations.schema.json"
+                "$<TARGET_FILE_DIR:${tgt}>/constellations.schema.json"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/data/constellations.json"
+                "$<TARGET_FILE_DIR:${tgt}>/constellations.json"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/data/reflector_targets.json"
+                "$<TARGET_FILE_DIR:${tgt}>/reflector_targets.json"
+            COMMENT "Copying data files next to ${tgt}"
+        )
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+        add_custom_command(TARGET ${tgt} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+                "$<TARGET_FILE_DIR:${tgt}>/assets"
+            COMMENT "Copying assets next to ${tgt}"
+        )
+    endif()
+    # THIRD_PARTY_NOTICES.txt must ship next to the executable in every distributed copy —
+    # MIT/zlib library licenses require the license text to travel with the binary, not just
+    # live in an in-app tab (see UC2 in RELEASE_v1_1_PLAN.md).
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.txt")
+        add_custom_command(TARGET ${tgt} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.txt"
+                "$<TARGET_FILE_DIR:${tgt}>/THIRD_PARTY_NOTICES.txt"
+            COMMENT "Copying THIRD_PARTY_NOTICES.txt next to ${tgt}"
+        )
+    endif()
+endfunction()
 
-# THIRD_PARTY_NOTICES.txt must ship next to the executable in every distributed
-# copy — MIT/zlib library licenses require the license text to travel with the
-# binary, not just live in an in-app tab (see UC2 in RELEASE_v1_1_PLAN.md).
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.txt")
-    add_custom_command(TARGET SatLightSim POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.txt"
-            "$<TARGET_FILE_DIR:SatLightSim>/THIRD_PARTY_NOTICES.txt"
-        COMMENT "Copying THIRD_PARTY_NOTICES.txt to output directory"
-    )
+sat_copy_runtime_files(SatLightSim)
+if(SAT_BUILD_FRESH_TARGET)
+    sat_copy_runtime_files(SatLightSimFresh)
 endif()
 
 # ── Release packaging ─────────────────────────────────────────────────────────

@@ -405,6 +405,14 @@ void SatelliteSim::buildUI(float dt, UIRenderer &ui)
     // can safely run alongside the (by then static) cinematic hold.
     if (win && (!showIntro || introCaptionIndex >= kIntroControlsIndex))
     {
+        // Optional per-axis look inversion (Settings > Controls). Mutate the frame's accumulated
+        // deltas once, up front, so every consumer below (cinematic drift + direct control) sees
+        // the inverted value; dmx/dmy are zeroed at the end of this block regardless.
+        if (invertMouseX)
+            dmx = -dmx;
+        if (invertMouseY)
+            dmy = -dmy;
+
         // Clear cinematic mode as soon as RMB is released — the toggle only lives
         // while a pan is active, so it resets automatically for the next drag.
         if (!camera.captured && cinematicMode)
@@ -970,9 +978,14 @@ void SatelliteSim::buildRightHudPanel(const UIInput &inp, UIRenderer &ui)
                                        .backgroundColor = Pal::divider}) {}
 
         // ── Version ───────────────────────────────────────────────────────
+        // Built from APP_VERSION (CMake → version.h) so it can't drift from the VERSION file.
+        static char versionBuf[48] = {};
+        if (!versionBuf[0])
+            snprintf(versionBuf, sizeof(versionBuf), "SAT LIGHT SIM v%s", APP_VERSION);
+        Clay_String versionStr{false, (int32_t)strlen(versionBuf), versionBuf};
         CLAY(CLAY_ID("SBVersion"), {.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)}}})
         {
-            CLAY_TEXT(CLAY_STRING("SAT LIGHT SIM v1.1.0"),
+            CLAY_TEXT(versionStr,
                       CLAY_TEXT_CONFIG({.textColor = Pal::textHint, .fontSize = fs(11)}));
         }
 
@@ -1707,6 +1720,60 @@ void SatelliteSim::buildSettingsControlsTab(const UIInput &inp, UIRenderer &ui)
                           CLAY_TEXT_CONFIG({.textColor = Pal::btnLabel, .fontSize = fs(10)}));
             }
         }
+    }
+
+    // ── Look-axis inversion ───────────────────────────────────────────────────
+    // Applied where the mouse dmx/dmy and gamepad right-stick look deltas are consumed
+    // (SatelliteSim.cpp / SatelliteSimUI.cpp look block). Persisted in settings.json's "controls".
+    CLAY(CLAY_ID("InvertDiv"), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)},
+                                           .padding = {0, 0, 8, 6}},
+                                .backgroundColor = {40, 40, 44, 255}}) {}
+    CLAY_TEXT(CLAY_STRING("INVERT LOOK AXES"),
+              CLAY_TEXT_CONFIG({.textColor = Pal::textHint, .fontSize = fs(10)}));
+
+    struct InvertRow
+    {
+        const char *label;
+        bool *value;
+        bool *hov;
+    };
+    InvertRow invertRows[] = {
+        {"Mouse X (horizontal)", &invertMouseX, &hovInvertMouseX},
+        {"Mouse Y (vertical)", &invertMouseY, &hovInvertMouseY},
+        {"Controller X (horizontal)", &invertPadX, &hovInvertPadX},
+        {"Controller Y (vertical)", &invertPadY, &hovInvertPadY},
+    };
+    int invIdx = 0;
+    for (auto &row : invertRows)
+    {
+        CLAY(CLAY_IDI("InvertRow", invIdx), {.layout = {
+                                                 .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(24)},
+                                                 .padding = {4, 4, 2, 2},
+                                                 .childGap = 8,
+                                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                                 .layoutDirection = CLAY_LEFT_TO_RIGHT}})
+        {
+            Clay_String lbl{false, (int32_t)strlen(row.label), row.label};
+            CLAY_TEXT(lbl, CLAY_TEXT_CONFIG({.textColor = Pal::volLabel, .fontSize = fs(12)}));
+            CLAY(CLAY_IDI("InvertSpacer", invIdx), {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1)}}}) {}
+            Clay_Color chkBg = *row.value ? Pal::btnAccent : (*row.hov ? Pal::btnHover : Pal::btnIdle);
+            CLAY(CLAY_IDI("InvertChk", invIdx), {.layout = {
+                                                     .sizing = {CLAY_SIZING_FIXED(50), CLAY_SIZING_FIXED(22)},
+                                                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                                                 .backgroundColor = chkBg,
+                                                 .cornerRadius = CLAY_CORNER_RADIUS(3)})
+            {
+                bool n = Clay_Hovered();
+                sndRollover(n, *row.hov);
+                sndClick(n, inp.lmbPressed);
+                if (n && inp.lmbPressed)
+                    *row.value = !*row.value;
+                *row.hov = n;
+                CLAY_TEXT(*row.value ? CLAY_STRING("ON") : CLAY_STRING("OFF"),
+                          CLAY_TEXT_CONFIG({.textColor = Pal::textPrimary, .fontSize = fs(11)}));
+            }
+        }
+        ++invIdx;
     }
 }
 
@@ -3910,6 +3977,15 @@ void SatelliteSim::applyGraphicsPreset(GraphicsPreset p)
 // Must be called after initConstellation() so constellations[] is populated.
 void SatelliteSim::loadSettings()
 {
+#ifdef SAT_FRESH_SETTINGS
+    // Fresh-settings build (SatLightSimFresh / -DSAT_FRESH_SETTINGS): never read a persisted
+    // settings.json, so every launch is a genuine out-of-the-box first run. Still seed the
+    // graphics preset from the device the same way a real first run does (below), so what's
+    // being tested is the true default experience, not an unseeded High.
+    fprintf(stderr, "[SatelliteSim] FRESH build: ignoring any settings.json; using defaults.\n");
+    applyGraphicsPreset(seedGraphicsPresetFromDevice(*ctx_));
+    return;
+#endif
     auto path = (std::filesystem::path(userDataDir_) / "settings.json").string();
     std::ifstream f(path);
     if (!f.is_open())
@@ -4058,6 +4134,15 @@ void SatelliteSim::loadSettings()
     {
         timeScaleIdx = j["time"].value("scale_idx", timeScaleIdx);
         timeScaleIdx = std::clamp(timeScaleIdx, 0, kNumTimeScales - 1);
+    }
+
+    if (j.contains("controls"))
+    {
+        auto &ctl = j["controls"];
+        invertMouseX = ctl.value("invert_mouse_x", invertMouseX);
+        invertMouseY = ctl.value("invert_mouse_y", invertMouseY);
+        invertPadX = ctl.value("invert_pad_x", invertPadX);
+        invertPadY = ctl.value("invert_pad_y", invertPadY);
     }
 
     if (j.contains("controls") && j["controls"].contains("keybindings"))
@@ -4243,6 +4328,10 @@ void SatelliteSim::loadSettings()
 // Called on cleanup() and when the settings window is closed.
 void SatelliteSim::saveSettings()
 {
+#ifdef SAT_FRESH_SETTINGS
+    // Fresh-settings build: never persist, so the next launch stays pristine. See loadSettings().
+    return;
+#endif
     if (userDataDir_.empty())
         return;
 
@@ -4410,6 +4499,10 @@ void SatelliteSim::saveSettings()
     for (const auto &kb : keybindings)
         kbArr.push_back({{"action", kb.action}, {"key", kb.key}, {"gp_button", kb.gpButton}});
     j["controls"]["keybindings"] = kbArr;
+    j["controls"]["invert_mouse_x"] = invertMouseX;
+    j["controls"]["invert_mouse_y"] = invertMouseY;
+    j["controls"]["invert_pad_x"] = invertPadX;
+    j["controls"]["invert_pad_y"] = invertPadY;
 
     nlohmann::json constArr = nlohmann::json::array();
     for (const auto &c : constellations)

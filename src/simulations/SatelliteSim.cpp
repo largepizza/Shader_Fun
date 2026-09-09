@@ -798,6 +798,13 @@ void SatelliteSim::pollGamepad(float dt)
     constexpr float kGamepadLookDegPerSec = 90.0f;
     gpLookYawDeg = deadzone(state.axes[GLFW_GAMEPAD_AXIS_RIGHT_X], 0.15f) * kGamepadLookDegPerSec * dt;
     gpLookPitchDeg = deadzone(state.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y], 0.15f) * kGamepadLookDegPerSec * dt;
+    // Optional per-axis inversion (Settings > Controls). Applied here rather than at the consumer
+    // so the virtual-cursor branch below — which reads the same raw right-stick axes for pointer
+    // motion, not camera look — is unaffected.
+    if (invertPadX)
+        gpLookYawDeg = -gpLookYawDeg;
+    if (invertPadY)
+        gpLookPitchDeg = -gpLookPitchDeg;
 
     // Triggers: elevation pressure. GLFW's standardized gamepad axes are documented as -1
     // (released) to +1 (fully pressed), so remap to [0,1]; small deadzone at the released end
@@ -986,6 +993,11 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
     if ((!showIntro || introCaptionIndex >= kIntroControlsIndex) && win)
     {
         bool boost = (win && glfwGetKey(win, keybindings[KB_MOVE_BOOST].key) == GLFW_PRESS) || gpHeld(KB_MOVE_BOOST);
+        // Sprinting cancels fine/slow mode outright (untoggles it, so it stays off after boost is
+        // released). Reaching for boost is the clearest possible "I want to move faster now"
+        // signal, and the two modes are contradictory intents.
+        if (boost)
+            fineMoveToggled = false;
         bool fine = fineMoveToggled; // latched by KB_MOVE_FINE (dispatchKeyAction), not held
         float speed = boost ? 0.5f : fine ? 0.005f
                                           : 0.08f; // boost = fast, fine = slow, default = normal
@@ -1022,7 +1034,12 @@ void SatelliteSim::recordCompute(VkCommandBuffer cmd, VulkanContext &ctx, float 
         float lowerAmt = std::max((glfwGetKey(win, keybindings[KB_LOWER_ELEV].key) == GLFW_PRESS || gpHeld(KB_LOWER_ELEV)) ? 1.0f : 0.0f, gpElevLower);
         if (raiseAmt > 0.0f || lowerAmt > 0.0f)
         {
-            float rate = std::max(10.0f, obsHeightOffset * 0.5f);
+            // Additive, NOT max(): a purely proportional rate makes descent an exponential
+            // approach to the surface — and the climb back out an equally slow exponential crawl,
+            // which reads as getting "stuck" in the terrain. The constant floor term keeps
+            // low-altitude vertical moves at a brisk fixed speed while the proportional term still
+            // scales the rate up for fast LEO-altitude traversal (where it dominates anyway).
+            float rate = 100.0f + obsHeightOffset * 0.5f;
             if (boost)
                 rate *= 10.0f;
             if (fine)
